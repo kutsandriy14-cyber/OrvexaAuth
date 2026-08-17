@@ -1,8 +1,18 @@
+import java.util.Properties
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.roborazzi)
+}
+
+val signingProperties = Properties().apply {
+  val signingFile = rootProject.file("signing.properties")
+  check(signingFile.exists()) {
+    "Missing signing.properties. A signed OrvexaAuth release must use the permanent release key."
+  }
+  signingFile.inputStream().use { input -> load(input) }
 }
 
 android {
@@ -13,19 +23,18 @@ android {
     applicationId = "com.orvexa.auth"
     minSdk = 24
     targetSdk = 36
-    versionCode = 2
-    versionName = "0.1.1-beta01"
+    versionCode = 3
+    versionName = "0.1.1-beta02"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      storeFile = file(signingProperties.getProperty("storeFile"))
+      storePassword = signingProperties.getProperty("storePassword")
+      keyAlias = signingProperties.getProperty("keyAlias")
+      keyPassword = signingProperties.getProperty("keyPassword")
     }
   }
 

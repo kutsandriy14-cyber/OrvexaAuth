@@ -17,16 +17,16 @@ Registration for a PC account is provided by the OrvexaAuth web client. The Andr
 Prerequisites are Android Studio or a Java 11/21 environment with the Android SDK installed. From the `client` project directory, run:
 
 ```bash
-./gradlew :app:assembleDebug --no-daemon
+./gradlew :app:assembleRelease --no-daemon
 ```
 
-The debug APK is created at:
+The signed release APK is created at:
 
 ```text
-app/build/outputs/apk/debug/app-debug.apk
+app/build/outputs/apk/release/app-release.apk
 ```
 
-Do not commit `local.properties`, signing keys, generated build directories or APK files. The repository workflow builds the APK and publishes a prerelease asset automatically on pushes to `main`.
+Every release must use the same private signing keystore. The keystore and `signing.properties` are intentionally ignored by Git; store their encrypted backup offline before creating another release. Do not commit `local.properties`, signing keys, generated build directories or APK files.
 
 ## Credential Manager
 
@@ -34,7 +34,7 @@ The app contains an optional Android Credential Manager adapter. It delegates pa
 
 ## Updates
 
-The client checks the OrvexaAuth GitHub Releases endpoint over HTTPS. When a newer beta release is available, the user can download the APK through Android DownloadManager and approve installation in the system package installer. The release workflow publishes a SHA-256 checksum alongside the APK; users should verify the checksum before installing manually downloaded builds.
+The client checks the OrvexaAuth GitHub Releases endpoint over HTTPS. When a newer beta release is available, the user can download the APK through Android DownloadManager and approve installation in the system package installer. Each manual GitHub release includes a SHA-256 checksum; users should verify the checksum before installing manually downloaded builds.
 
 ## Cloudflare Worker
 
@@ -50,15 +50,9 @@ Authenticated social routes currently include friend requests and acceptance (`/
 
 The desktop client creates a five-minute request through `POST /api/qr/sessions` and receives an `approveUrl` in the form `orvexaauth://qr/approve?request=<id>`. Opening that URL on an Android device with OrvexaAuth transfers the request identifier to the app. The already authenticated mobile app confirms the request with its bearer session; the desktop client then polls `GET /api/qr/sessions/{id}` and receives a new server-issued token only after approval. The QR request itself contains no password and does not persist a token in the Launcher settings file.
 
-## GitHub workflow
+## Releases
 
-`.github/workflows/android.yml` performs the following actions on `main`:
-
-1. Sets up JDK 21 and Gradle.
-2. Builds the Beta 0.1.1 debug APK.
-3. Generates a SHA-256 checksum.
-4. Uploads the APK artifact.
-5. Publishes or updates the `v0.1.1-beta01` prerelease with the APK and checksum.
+Automatic GitHub Actions publication is intentionally disabled. A maintainer creates a release only after building and verifying `assembleRelease` with the permanent private signing key. This prevents a new certificate from being generated for a later build and lets Android accept future updates that use the same application ID and signing certificate.
 
 ## Scope exclusions
 
