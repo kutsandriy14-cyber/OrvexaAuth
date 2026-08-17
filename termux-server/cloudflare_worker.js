@@ -13,6 +13,8 @@
 // OrvexaAuth Beta uses public HTTPS endpoints with server-issued bearer sessions.
 // Do not put API secrets in this source file.
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
+const LAN_SESSION_TTL_SECONDS = 4 * 60 * 60; // 4 hours
+const LAN_TICKET_TTL_SECONDS = 5 * 60; // 5 minutes
 
 // CORS headers helper
 function corsHeaders() {
@@ -240,6 +242,103 @@ async function sessionAllowsMinecraft(kv, dbName, minecraftSession, userId) {
   return minecraftSession.accessMode === "friends" && areFriends(kv, dbName, minecraftSession.ownerId, userId);
 }
 
+function lanSessionKey(dbName, sessionId) {
+  return `${dbName}:lan_session:${sessionId}`;
+}
+
+function lanTicketKey(dbName, ticket) {
+  return `${dbName}:lan_ticket:${ticket}`;
+}
+
+function lanRelayId(env, dbName, sessionId) {
+  return env.LAN_RELAY.idFromName(`${dbName}:${sessionId}`);
+}
+
+async function readLanSession(kv, dbName, sessionId) {
+  const raw = await kv.get(lanSessionKey(dbName, sessionId));
+  if (!raw) return null;
+  try {
+    const session = JSON.parse(raw);
+    if (!session.expiresAt || Number(session.expiresAt) <= Date.now() || session.state === "closed") {
+      await kv.delete(lanSessionKey(dbName, sessionId));
+      return null;
+    }
+    return session;
+  } catch (_error) {
+    await kv.delete(lanSessionKey(dbName, sessionId));
+    return null;
+  }
+}
+
+async function sessionAllowsLan(kv, dbName, lanSession, userId) {
+  if (String(lanSession.hostUserId) === String(userId)) return true;
+  if (Array.isArray(lanSession.allowedUserIds) && lanSession.allowedUserIds.map(String).includes(String(userId))) return true;
+  return lanSession.accessMode === "friends" && areFriends(kv, dbName, lanSession.hostUserId, userId);
+}
+
+function publicLanSession(lanSession, hostUser = null) {
+  return {
+    id: lanSession.id,
+    hostUserId: String(lanSession.hostUserId),
+    hostName: hostUser ? `${hostUser.firstName || ""} ${hostUser.lastName || ""}`.trim() : "",
+    title: lanSession.title,
+    accessMode: lanSession.accessMode,
+    state: lanSession.state,
+    createdAt: lanSession.createdAt,
+    updatedAt: lanSession.updatedAt,
+    expiresAt: lanSession.expiresAt,
+    isHost: false
+  };
+}
+
+function lanRelayUrl(request, sessionId, ticket) {
+  const url = new URL(request.url);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = `/api/lan/relay/${encodeURIComponent(sessionId)}`;
+  url.search = new URLSearchParams({ ticket }).toString();
+  return url.toString();
+}
+
+async function issueLanTicket(kv, dbName, lanSession, userId, role) {
+  const ticket = crypto.randomUUID();
+  const createdAt = Date.now();
+  const expiresAt = Math.min(createdAt + LAN_TICKET_TTL_SECONDS * 1000, Number(lanSession.expiresAt));
+  if (expiresAt <= createdAt) throw new Error("LAN session has expired");
+  const ticketRecord = {
+    ticket,
+    dbName,
+    sessionId: lanSession.id,
+    userId: String(userId),
+    role,
+    createdAt,
+    expiresAt
+  };
+  await kv.put(lanTicketKey(dbName, ticket), JSON.stringify(ticketRecord), {
+    expirationTtl: Math.max(1, Math.ceil((expiresAt - createdAt) / 1000))
+  });
+  return ticketRecord;
+}
+
+async function initialiseLanRelay(env, dbName, lanSession) {
+  if (!env.LAN_RELAY) return;
+  const relay = env.LAN_RELAY.get(lanRelayId(env, dbName, lanSession.id));
+  await relay.fetch("https://lan-relay.internal/initialize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dbName, sessionId: lanSession.id, expiresAt: lanSession.expiresAt })
+  });
+}
+
+async function closeLanRelay(env, dbName, sessionId, code = 4001, reason = "LAN session closed") {
+  if (!env.LAN_RELAY) return;
+  const relay = env.LAN_RELAY.get(lanRelayId(env, dbName, sessionId));
+  await relay.fetch("https://lan-relay.internal/close", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code, reason })
+  });
+}
+
 async function hasAdminAccess(request, env) {
   const configuredSecret = String(env?.ADMIN_SECRET || "");
   const header = request.headers.get("Authorization") || "";
@@ -289,7 +388,7 @@ async function listUserSessions(kv, dbName, userId) {
   return sessions.sort((left, right) => Number(right.createdAt || 0) - Number(left.createdAt || 0));
 }
 
-async function deleteUserRecords(kv, dbName, user) {
+async function deleteUserRecords(kv, dbName, user, env = {}) {
   const userId = String(user.id);
   const userKey = `${dbName}:user:${userId}`;
   await kv.delete(userKey);
@@ -350,9 +449,27 @@ async function deleteUserRecords(kv, dbName, user) {
       }
     } catch (_error) {}
   }
+
+  for (const keyInfo of await listAllKeys(kv, `${dbName}:lan_session:`)) {
+    const raw = await kv.get(keyInfo.name);
+    try {
+      const lanSession = raw && JSON.parse(raw);
+      if (!lanSession) continue;
+      if (String(lanSession.hostUserId) === userId) {
+        await kv.delete(keyInfo.name);
+        await closeLanRelay(env, dbName, lanSession.id, 4001, "Host account deleted");
+      } else if (Array.isArray(lanSession.allowedUserIds) && lanSession.allowedUserIds.map(String).includes(userId)) {
+        lanSession.allowedUserIds = lanSession.allowedUserIds.map(String).filter(allowedId => allowedId !== userId);
+        lanSession.updatedAt = Date.now();
+        await kv.put(keyInfo.name, JSON.stringify(lanSession), {
+          expirationTtl: Math.max(1, Math.ceil((Number(lanSession.expiresAt) - Date.now()) / 1000))
+        });
+      }
+    } catch (_error) {}
+  }
 }
 
-async function handleAdminRequest(request, url, kv, dbName) {
+async function handleAdminRequest(request, url, kv, dbName, env = {}) {
   const path = url.pathname;
   const method = request.method;
   const userMatch = path.match(/^\/api\/admin\/users\/([^/]+)$/);
@@ -414,7 +531,7 @@ async function handleAdminRequest(request, url, kv, dbName) {
   if (userMatch && method === "DELETE") {
     const user = await readUser(kv, dbName, userMatch[1]);
     if (!user) return errorResponse("User not found", 404);
-    await deleteUserRecords(kv, dbName, user);
+    await deleteUserRecords(kv, dbName, user, env);
     return jsonResponse({ status: "success", deletedUserId: String(user.id) });
   }
 
@@ -460,7 +577,7 @@ async function handleFetch(request, env = {}, ctx) {
     if (path.startsWith("/api/admin/")) {
       if (!(await hasAdminAccess(request, env))) return errorResponse("Forbidden: valid administrator credentials are required", 403);
       try {
-        return await handleAdminRequest(request, url, kv, dbName);
+        return await handleAdminRequest(request, url, kv, dbName, env);
       } catch (error) {
         console.error("OrvexaAuth admin route error", error);
         return errorResponse("Administrative request failed", 500);
@@ -1043,6 +1160,190 @@ async function handleFetch(request, env = {}, ctx) {
         return jsonResponse({ allowed, sessionId, accessMode: minecraftSession.accessMode });
       }
 
+      // 5c. VIRTUAL LAN GAME SESSIONS. The Worker never stores a home address,
+      // Minecraft port or bearer token; the Durable Object only relays a single
+      // authenticated host/guest binary stream after each side consumes a ticket.
+      if (/^\/api\/lan\/relay\/[^/]+$/.test(path) && method === "GET") {
+        const sessionId = path.split("/")[4];
+        const ticket = String(url.searchParams.get("ticket") || "").trim();
+        if (!ticket) return errorResponse("A LAN relay ticket is required", 401);
+        if (!env.LAN_RELAY) return errorResponse("LAN relay is not configured", 503);
+        const relay = env.LAN_RELAY.get(lanRelayId(env, dbName, sessionId));
+        return relay.fetch(request);
+      }
+
+      if (path === "/api/lan/sessions" && method === "POST") {
+        if (!env.LAN_RELAY) return errorResponse("LAN relay is not configured", 503);
+        const body = await request.json();
+        const title = String(body.title || body.worldName || "Minecraft LAN world").trim().slice(0, 120);
+        if (!title) return errorResponse("World name is required", 400);
+        const accessMode = body.accessMode === "friends" ? "friends" : "invite";
+        const requestedInvitees = Array.isArray(body.allowedUserIds) ? body.allowedUserIds : [];
+        const allowedUserIds = [];
+        for (const requestedId of requestedInvitees.slice(0, 20)) {
+          const targetId = await resolveUserId(kv, dbName, requestedId);
+          if (!targetId) return errorResponse("Invited account not found", 404);
+          if (String(targetId) === String(authSession.userId)) continue;
+          if (!(await areFriends(kv, dbName, authSession.userId, targetId))) {
+            return errorResponse("Only accepted friends can be invited", 403);
+          }
+          if (!allowedUserIds.includes(String(targetId))) allowedUserIds.push(String(targetId));
+        }
+        const createdAt = Date.now();
+        const lanSession = {
+          id: crypto.randomUUID(),
+          hostUserId: String(authSession.userId),
+          title,
+          accessMode,
+          allowedUserIds,
+          state: "open",
+          createdAt,
+          updatedAt: createdAt,
+          expiresAt: createdAt + LAN_SESSION_TTL_SECONDS * 1000
+        };
+        await kv.put(lanSessionKey(dbName, lanSession.id), JSON.stringify(lanSession), {
+          expirationTtl: LAN_SESSION_TTL_SECONDS
+        });
+        await initialiseLanRelay(env, dbName, lanSession);
+        await writeUserEvent(kv, dbName, authSession.userId, "lan_session_created", request,
+                             { sessionId: lanSession.id, title }, env, ctx);
+        const hostTicket = await issueLanTicket(kv, dbName, lanSession, authSession.userId, "host");
+        return jsonResponse({
+          session: { ...publicLanSession(lanSession), isHost: true, allowedUserIds },
+          hostTicket: hostTicket.ticket,
+          ticketExpiresAt: hostTicket.expiresAt,
+          relayUrl: lanRelayUrl(request, lanSession.id, hostTicket.ticket)
+        }, 201);
+      }
+
+      if (path === "/api/lan/sessions" && method === "GET") {
+        const keys = await listAllKeys(kv, `${dbName}:lan_session:`);
+        const sessions = [];
+        for (const keyInfo of keys) {
+          const raw = await kv.get(keyInfo.name);
+          if (!raw) continue;
+          try {
+            const lanSession = JSON.parse(raw);
+            if (Number(lanSession.expiresAt) <= Date.now() || lanSession.state !== "open") {
+              await kv.delete(keyInfo.name);
+              continue;
+            }
+            if (!(await sessionAllowsLan(kv, dbName, lanSession, authSession.userId))) continue;
+            const host = await readUser(kv, dbName, lanSession.hostUserId);
+            sessions.push({
+              ...publicLanSession(lanSession, host),
+              isHost: String(lanSession.hostUserId) === String(authSession.userId),
+              ...(String(lanSession.hostUserId) === String(authSession.userId)
+                ? { allowedUserIds: lanSession.allowedUserIds }
+                : {})
+            });
+          } catch (_error) {}
+        }
+        sessions.sort((left, right) => Number(right.createdAt) - Number(left.createdAt));
+        return jsonResponse({ sessions });
+      }
+
+      if (/^\/api\/lan\/sessions\/[^/]+$/.test(path) && method === "GET") {
+        const sessionId = path.split("/")[4];
+        const lanSession = await readLanSession(kv, dbName, sessionId);
+        if (!lanSession) return errorResponse("LAN session not found or expired", 404);
+        if (!(await sessionAllowsLan(kv, dbName, lanSession, authSession.userId))) {
+          return errorResponse("You do not have access to this LAN session", 403);
+        }
+        const host = await readUser(kv, dbName, lanSession.hostUserId);
+        return jsonResponse({
+          session: {
+            ...publicLanSession(lanSession, host),
+            isHost: String(lanSession.hostUserId) === String(authSession.userId),
+            ...(String(lanSession.hostUserId) === String(authSession.userId)
+              ? { allowedUserIds: lanSession.allowedUserIds }
+              : {})
+          }
+        });
+      }
+
+      if (/^\/api\/lan\/sessions\/[^/]+\/host-ticket$/.test(path) && method === "POST") {
+        const sessionId = path.split("/")[4];
+        const lanSession = await readLanSession(kv, dbName, sessionId);
+        if (!lanSession) return errorResponse("LAN session not found or expired", 404);
+        if (String(lanSession.hostUserId) !== String(authSession.userId)) {
+          return errorResponse("Only the LAN host can request a host ticket", 403);
+        }
+        const ticket = await issueLanTicket(kv, dbName, lanSession, authSession.userId, "host");
+        return jsonResponse({ sessionId, role: "host", ticket: ticket.ticket, expiresAt: ticket.expiresAt,
+                              relayUrl: lanRelayUrl(request, sessionId, ticket.ticket) });
+      }
+
+      if (/^\/api\/lan\/sessions\/[^/]+\/join-ticket$/.test(path) && method === "POST") {
+        const sessionId = path.split("/")[4];
+        const lanSession = await readLanSession(kv, dbName, sessionId);
+        if (!lanSession) return errorResponse("LAN session not found or expired", 404);
+        if (String(lanSession.hostUserId) === String(authSession.userId)) {
+          return errorResponse("The LAN host must use a host ticket", 409);
+        }
+        if (!(await sessionAllowsLan(kv, dbName, lanSession, authSession.userId))) {
+          return errorResponse("You do not have access to this LAN session", 403);
+        }
+        const ticket = await issueLanTicket(kv, dbName, lanSession, authSession.userId, "guest");
+        await writeUserEvent(kv, dbName, authSession.userId, "lan_join_ticket_issued", request,
+                             { sessionId, title: lanSession.title }, env, ctx);
+        return jsonResponse({ sessionId, role: "guest", ticket: ticket.ticket, expiresAt: ticket.expiresAt,
+                              relayUrl: lanRelayUrl(request, sessionId, ticket.ticket) });
+      }
+
+      if (/^\/api\/lan\/sessions\/[^/]+\/invites$/.test(path) && method === "POST") {
+        const sessionId = path.split("/")[4];
+        const lanSession = await readLanSession(kv, dbName, sessionId);
+        if (!lanSession) return errorResponse("LAN session not found or expired", 404);
+        if (String(lanSession.hostUserId) !== String(authSession.userId)) {
+          return errorResponse("Only the LAN host can manage invites", 403);
+        }
+        const targetId = await resolveUserId(kv, dbName, (await request.json()).targetUserId);
+        if (!targetId) return errorResponse("Invited account not found", 404);
+        if (String(targetId) !== String(authSession.userId) && !(await areFriends(kv, dbName, authSession.userId, targetId))) {
+          return errorResponse("Only accepted friends can be invited", 403);
+        }
+        if (!lanSession.allowedUserIds.map(String).includes(String(targetId))) lanSession.allowedUserIds.push(String(targetId));
+        lanSession.updatedAt = Date.now();
+        await kv.put(lanSessionKey(dbName, sessionId), JSON.stringify(lanSession), {
+          expirationTtl: Math.max(1, Math.ceil((Number(lanSession.expiresAt) - Date.now()) / 1000))
+        });
+        await writeUserEvent(kv, dbName, targetId, "lan_invite_received", request,
+                             { sessionId, title: lanSession.title }, env, ctx);
+        return jsonResponse({ session: { ...publicLanSession(lanSession), isHost: true, allowedUserIds: lanSession.allowedUserIds } });
+      }
+
+      if (/^\/api\/lan\/sessions\/[^/]+\/invites\/[^/]+$/.test(path) && method === "DELETE") {
+        const parts = path.split("/");
+        const sessionId = parts[4];
+        const targetId = parts[6];
+        const lanSession = await readLanSession(kv, dbName, sessionId);
+        if (!lanSession) return errorResponse("LAN session not found or expired", 404);
+        if (String(lanSession.hostUserId) !== String(authSession.userId)) {
+          return errorResponse("Only the LAN host can manage invites", 403);
+        }
+        lanSession.allowedUserIds = lanSession.allowedUserIds.map(String).filter(id => id !== String(targetId));
+        lanSession.updatedAt = Date.now();
+        await kv.put(lanSessionKey(dbName, sessionId), JSON.stringify(lanSession), {
+          expirationTtl: Math.max(1, Math.ceil((Number(lanSession.expiresAt) - Date.now()) / 1000))
+        });
+        return jsonResponse({ session: { ...publicLanSession(lanSession), isHost: true, allowedUserIds: lanSession.allowedUserIds } });
+      }
+
+      if (/^\/api\/lan\/sessions\/[^/]+$/.test(path) && method === "DELETE") {
+        const sessionId = path.split("/")[4];
+        const lanSession = await readLanSession(kv, dbName, sessionId);
+        if (!lanSession) return errorResponse("LAN session not found or expired", 404);
+        if (String(lanSession.hostUserId) !== String(authSession.userId)) {
+          return errorResponse("Only the LAN host can close this session", 403);
+        }
+        await kv.delete(lanSessionKey(dbName, sessionId));
+        await closeLanRelay(env, dbName, sessionId);
+        await writeUserEvent(kv, dbName, authSession.userId, "lan_session_closed", request,
+                             { sessionId, title: lanSession.title }, env, ctx);
+        return jsonResponse({ status: "success", sessionId });
+      }
+
       // 6. UPDATE PROFILE
       if (path.startsWith("/api/users/") && method === "PUT" && !path.endsWith("/password")) {
         const userId = path.split("/")[3];
@@ -1104,7 +1405,7 @@ async function handleFetch(request, env = {}, ctx) {
         if (!body.passwordHash || body.passwordHash !== profileData.passwordHash) {
           return errorResponse("Current password is incorrect", 401);
         }
-        await deleteUserRecords(kv, dbName, profileData);
+        await deleteUserRecords(kv, dbName, profileData, env);
         return jsonResponse({ status: "success", message: "User account deleted" }, 200);
       }
 
@@ -1288,6 +1589,129 @@ export default {
     return handleFetch(request, env, ctx);
   }
 };
+
+// Cloudflare Durable Object for exactly one authenticated host/guest pair.
+// It forwards binary Minecraft TCP frames untouched and accepts only tickets
+// minted by the API above; it cannot connect to arbitrary network addresses.
+export class LanRelay {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.hostSocket = null;
+    this.guestSocket = null;
+    this.sessionMeta = null;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname === "/initialize" && request.method === "POST") {
+      const meta = await request.json();
+      if (!meta.dbName || !meta.sessionId || !Number(meta.expiresAt)) return new Response("Invalid session metadata", { status: 400 });
+      this.sessionMeta = { dbName: String(meta.dbName), sessionId: String(meta.sessionId), expiresAt: Number(meta.expiresAt) };
+      await this.state.storage.put("sessionMeta", this.sessionMeta);
+      await this.state.storage.setAlarm(this.sessionMeta.expiresAt);
+      return new Response(null, { status: 204 });
+    }
+
+    if (url.pathname === "/close" && request.method === "POST") {
+      const detail = await request.json().catch(() => ({}));
+      this.closeAll(Number(detail.code) || 4001, String(detail.reason || "LAN session closed"));
+      await this.state.storage.deleteAll();
+      return new Response(null, { status: 204 });
+    }
+
+    if (request.headers.get("Upgrade") !== "websocket") return new Response("WebSocket upgrade required", { status: 426 });
+    const ticketValue = String(url.searchParams.get("ticket") || "").trim();
+    if (!ticketValue) return new Response("LAN relay ticket is required", { status: 401 });
+
+    const ticketRaw = await this.env.ORVEXAAUTH_KV.get(`${(await this.getSessionMeta())?.dbName}:lan_ticket:${ticketValue}`);
+    if (!ticketRaw) return new Response("LAN relay ticket was not found or has expired", { status: 401 });
+    let ticket;
+    try { ticket = JSON.parse(ticketRaw); } catch (_error) { return new Response("Invalid LAN relay ticket", { status: 401 }); }
+    const sessionMeta = await this.getSessionMeta();
+    if (!sessionMeta || sessionMeta.sessionId !== ticket.sessionId || Number(ticket.expiresAt) <= Date.now()) {
+      return new Response("LAN relay ticket is no longer valid", { status: 401 });
+    }
+    const lanSessionRaw = await this.env.ORVEXAAUTH_KV.get(`${ticket.dbName}:lan_session:${ticket.sessionId}`);
+    if (!lanSessionRaw) return new Response("LAN session is no longer active", { status: 404 });
+    let lanSession;
+    try { lanSession = JSON.parse(lanSessionRaw); } catch (_error) { return new Response("Invalid LAN session", { status: 404 }); }
+    if (lanSession.state !== "open" || Number(lanSession.expiresAt) <= Date.now()) return new Response("LAN session has expired", { status: 410 });
+    if ((ticket.role === "host" && this.hostSocket) || (ticket.role === "guest" && this.guestSocket)) {
+      return new Response("This LAN session role is already connected", { status: 409 });
+    }
+    if (!['host', 'guest'].includes(ticket.role)) return new Response("Invalid LAN relay role", { status: 401 });
+
+    // Durable Objects serialize events, so deleting after the occupancy check
+    // makes the ticket one-time even when the caller retries rapidly.
+    await this.env.ORVEXAAUTH_KV.delete(`${ticket.dbName}:lan_ticket:${ticketValue}`);
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    server.accept();
+    this.attachSocket(ticket.role, server);
+    this.emitReady();
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async alarm() {
+    this.closeAll(4008, "LAN session expired");
+    const meta = await this.getSessionMeta();
+    if (meta) await this.env.ORVEXAAUTH_KV.delete(`${meta.dbName}:lan_session:${meta.sessionId}`);
+    await this.state.storage.deleteAll();
+  }
+
+  async getSessionMeta() {
+    if (!this.sessionMeta) this.sessionMeta = await this.state.storage.get("sessionMeta");
+    return this.sessionMeta;
+  }
+
+  attachSocket(role, socket) {
+    if (role === "host") this.hostSocket = socket;
+    else this.guestSocket = socket;
+    socket.addEventListener("message", event => {
+      const target = role === "host" ? this.guestSocket : this.hostSocket;
+      if (!target) return;
+      try { target.send(event.data); } catch (_error) { this.closeSocket(role === "host" ? "guest" : "host", 1011, "Relay delivery failed"); }
+    });
+    socket.addEventListener("close", () => this.handleSocketClosed(role));
+    socket.addEventListener("error", () => this.handleSocketClosed(role));
+  }
+
+  handleSocketClosed(role) {
+    if (role === "host") {
+      this.hostSocket = null;
+      this.closeSocket("guest", 4002, "LAN host disconnected");
+    } else {
+      this.guestSocket = null;
+      this.sendControl(this.hostSocket, { type: "guest_disconnected" });
+    }
+  }
+
+  emitReady() {
+    if (this.hostSocket && this.guestSocket) {
+      this.sendControl(this.hostSocket, { type: "ready", peer: "guest" });
+      this.sendControl(this.guestSocket, { type: "ready", peer: "host" });
+    }
+  }
+
+  sendControl(socket, message) {
+    if (!socket) return;
+    try { socket.send(JSON.stringify(message)); } catch (_error) {}
+  }
+
+  closeSocket(role, code, reason) {
+    const socket = role === "host" ? this.hostSocket : this.guestSocket;
+    if (!socket) return;
+    if (role === "host") this.hostSocket = null;
+    else this.guestSocket = null;
+    try { socket.close(code, reason); } catch (_error) {}
+  }
+
+  closeAll(code, reason) {
+    this.closeSocket("host", code, reason);
+    this.closeSocket("guest", code, reason);
+  }
+}
 
 // Logging function to save history
 async function logAppEvent(kv, dbName, email, action, appNameInput) {
