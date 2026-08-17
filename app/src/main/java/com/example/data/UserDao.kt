@@ -70,8 +70,8 @@ class UserDao(context: Context) {
         }
     }
 
-    suspend fun deleteUser(user: User) {
-        runCatching { clientManager.getService().deleteAccount(user.id) }
+    suspend fun deleteUser(user: User, currentPasswordHash: String) {
+        clientManager.getService().deleteAccount(user.id, NetworkDeleteAccountRequest(currentPasswordHash))
     }
 
     /**

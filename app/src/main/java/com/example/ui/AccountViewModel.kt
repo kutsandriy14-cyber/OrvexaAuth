@@ -60,13 +60,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
     private val _allUsers = MutableStateFlow<List<User>>(emptyList())
     val allUsers: StateFlow<List<User>> = _allUsers.asStateFlow()
 
-    // Dynamic file storage state
-    private val _userFiles = MutableStateFlow<List<NetworkFileResponse>>(emptyList())
-    val userFiles: StateFlow<List<NetworkFileResponse>> = _userFiles.asStateFlow()
-
-    private val _isStorageLoading = MutableStateFlow(false)
-    val isStorageLoading: StateFlow<Boolean> = _isStorageLoading.asStateFlow()
-
     // Security and social data are server-driven and are never persisted as local authority.
     private val _activeSessions = MutableStateFlow<List<NetworkDeviceSession>>(emptyList())
     val activeSessions: StateFlow<List<NetworkDeviceSession>> = _activeSessions.asStateFlow()
@@ -80,9 +73,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
     val serverBlocks: StateFlow<List<NetworkBlockRelation>> = _serverBlocks.asStateFlow()
     private val _groups = MutableStateFlow<List<NetworkGroup>>(emptyList())
     val groups: StateFlow<List<NetworkGroup>> = _groups.asStateFlow()
-    private val _minecraftSessions = MutableStateFlow<List<NetworkMinecraftSession>>(emptyList())
-    val minecraftSessions: StateFlow<List<NetworkMinecraftSession>> = _minecraftSessions.asStateFlow()
-
     // Current logged-in user state
     private val _loggedInUser = MutableStateFlow<User?>(null)
     val loggedInUser: StateFlow<User?> = _loggedInUser.asStateFlow()
@@ -105,7 +95,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                         (session.userId == null || session.userId == savedUser.id)
                     if (validForUser) {
                         _loggedInUser.value = savedUser
-                        loadUserFiles()
                         refreshConnectedAccountData()
                     } else {
                         clientManager.clearSession()
@@ -171,50 +160,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 _allUsers.value = serverUsers
             } catch (e: Exception) {
                 _allUsers.value = emptyList()
-            }
-        }
-    }
-
-    // Server-side cloud storage files management (Cloudflare KV-backed Worker only)
-    fun loadUserFiles() {
-        val user = _loggedInUser.value ?: return
-        _isStorageLoading.value = true
-        viewModelScope.launch {
-            try {
-                _userFiles.value = clientManager.getService().getFiles(user.id)
-            } catch (e: Exception) {
-                _userFiles.value = emptyList()
-            } finally {
-                _isStorageLoading.value = false
-            }
-        }
-    }
-
-    fun uploadUserFile(fileName: String, content: String, onResult: (Boolean, String) -> Unit) {
-        val user = _loggedInUser.value ?: return
-        viewModelScope.launch {
-            try {
-                clientManager.getService().uploadFile(
-                    user.id,
-                    NetworkUploadFileRequest(fileName = fileName, content = content)
-                )
-                loadUserFiles()
-                onResult(true, "File uploaded to OrvexaAuth cloud storage")
-            } catch (e: Exception) {
-                onResult(false, e.localizedMessage ?: "Remote upload failed")
-            }
-        }
-    }
-
-    fun deleteUserFile(fileName: String, onResult: (Boolean, String) -> Unit) {
-        val user = _loggedInUser.value ?: return
-        viewModelScope.launch {
-            try {
-                clientManager.getService().deleteFile(user.id, fileName)
-                loadUserFiles()
-                onResult(true, "File deleted from OrvexaAuth cloud storage")
-            } catch (e: Exception) {
-                onResult(false, e.localizedMessage ?: "Remote delete failed")
             }
         }
     }
@@ -382,7 +327,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         val keyProtectInput = _loginKeyProtect.value
 
         if (email.isEmpty() || password.isEmpty()) {
-            _loginError.value = "Please fill in all fields"
+            _loginError.value = t("login_error_fill_fields")
             return
         }
 
@@ -415,10 +360,14 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 clientManager.saveLoggedInUser(remoteUser)
 
                 refreshServerUsers()
-                loadUserFiles()
                 onSuccess()
             } catch (e: Exception) {
-                _loginError.value = "Server authentication error: ${e.localizedMessage ?: "Connection refused"}"
+                _loginError.value = when ((e as? retrofit2.HttpException)?.code()) {
+                    401 -> t("login_error_wrong_password")
+                    404 -> t("login_error_account_not_found")
+                    429 -> t("login_error_rate_limited")
+                    else -> t("login_error_connection")
+                }
             }
         }
     }
@@ -457,7 +406,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         clientManager.clearLoggedInUser()
         _loggedInUser.value = null
         _loginPassword.value = ""
-        _userFiles.value = emptyList()
 
     }
 
@@ -637,7 +585,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 clientManager.saveLoggedInUser(localUser)
 
                 refreshServerUsers()
-                loadUserFiles()
                 onSuccess()
             } catch (e: Exception) {
                 _regError.value = "Registration failed: ${e.localizedMessage ?: "Connection refused"}"
@@ -717,26 +664,27 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun removeLocalAccountCache(user: User) {
-        viewModelScope.launch {
-            try {
-                val apiService = clientManager.getService()
-                apiService.deleteAccount(user.id)
-                refreshServerUsers()
-            } catch (e: Exception) {
-                // ignore
-            }
+        // Account removal on a device must never delete the remote OrvexaAuth account.
+        if (_loggedInUser.value?.id == user.id) {
+            logout()
         }
     }
 
-    fun deleteAccount(onSuccess: () -> Unit) {
-        val currentUser = _loggedInUser.value ?: return
+    fun deleteAccount(currentPassword: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
+        val currentUser = _loggedInUser.value ?: return onError(t("delete_error_not_signed_in"))
+        if (currentPassword.isBlank()) return onError(t("delete_error_password_required"))
 
         viewModelScope.launch {
             try {
                 val apiService = clientManager.getService()
-                apiService.deleteAccount(currentUser.id)
+                apiService.deleteAccount(currentUser.id, NetworkDeleteAccountRequest(sha256(currentPassword)))
             } catch (e: Exception) {
-                // The public beta keeps the current session intact when remote deletion fails.
+                val message = when ((e as? retrofit2.HttpException)?.code()) {
+                    401, 403 -> t("delete_error_wrong_password")
+                    404 -> t("delete_error_not_found")
+                    else -> t("delete_error_connection")
+                }
+                onError(message)
                 return@launch
             }
             clientManager.clearSession()
@@ -829,29 +777,8 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
             try {
                 val apiService = clientManager.getService()
 
-                // 1. Download User Cloud Files
-                val filesList = try {
-                    apiService.getFiles(user.id)
-                } catch (e: Exception) {
-                    emptyList()
-                }
-                val userFiles = mutableListOf<Map<String, Any>>()
-                filesList.forEach { fileResponse ->
-                    try {
-                        val responseBody = apiService.downloadFile(user.id, fileResponse.name)
-                        val bytes = responseBody.bytes()
-                        val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-                        userFiles.add(mapOf(
-                            "fileName" to fileResponse.name,
-                            "fileSize" to fileResponse.size,
-                            "contentBase64" to base64
-                        ))
-                    } catch (e: Exception) {
-                        // ignore file download errors
-                    }
-                }
-
-                // 2. Fetch Chat Conversations
+                // Fetch chat conversations. File storage belongs to the desktop Launcher,
+                // not the mobile identity client.
                 val chats = mutableListOf<Map<String, Any>>()
                 val otherUsers = _allUsers.value.filter { it.email.lowercase() != user.email.lowercase() }
                 otherUsers.forEach { other ->
@@ -891,7 +818,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                     }
                 }
 
-                // 3. User Profile Information
+                // User profile information
                 val userProfile = mapOf(
                     "email" to user.email,
                     "passwordHash" to user.passwordHash,
@@ -906,7 +833,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                     "dataQuotaMb" to user.dataQuotaMb
                 )
 
-                // 4. Blocklist
+                // Local blocklist
                 val blocklist = _blockedUsers.value.toList()
 
                 // Combine into master backup map
@@ -916,7 +843,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                     "exportTime" to System.currentTimeMillis(),
                     "userProfile" to userProfile,
                     "blocklist" to blocklist,
-                    "userFiles" to userFiles,
                     "chats" to chats
                 )
 
@@ -1044,10 +970,8 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                     }
 
                     refreshServerUsers()
-                    val registeredUser = _allUsers.value.find { it.email.lowercase() == email.lowercase() }
-                    val targetUserId = registeredUser?.id ?: 1
 
-                    // 2. Restore local blocklist
+                    // Restore local blocklist
                     val blocklist = parsed["blocklist"] as? List<*> ?: emptyList<Any>()
                     blocklist.forEach { item ->
                         if (item is String) {
@@ -1057,23 +981,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                         }
                     }
 
-                    // 3. Restore cloud files
-                    val userFiles = parsed["userFiles"] as? List<*> ?: emptyList<Any>()
-                    userFiles.forEach { item ->
-                        if (item is Map<*, *>) {
-                            val fileName = item["fileName"] as? String ?: ""
-                            val contentBase64 = item["contentBase64"] as? String ?: ""
-                            if (fileName.isNotEmpty() && contentBase64.isNotEmpty()) {
-                                try {
-                                    apiService.uploadFile(targetUserId, NetworkUploadFileRequest(fileName = fileName, content = contentBase64))
-                                } catch (e: Exception) {
-                                    // ignore upload failures
-                                }
-                            }
-                        }
-                    }
-
-                    // 4. Restore chat messaging transcripts
+                    // Restore chat messaging transcripts
                     val chatsList = parsed["chats"] as? List<*> ?: emptyList<Any>()
                     chatsList.forEach { chatItem ->
                         if (chatItem is Map<*, *>) {
@@ -1245,7 +1153,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 _blockedUsers.value = emails
             }
             runCatching { api.getGroups() }.onSuccess { _groups.value = it }
-            runCatching { api.getMinecraftSessions() }.onSuccess { _minecraftSessions.value = it }
         }
     }
 
@@ -1348,11 +1255,4 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun createMinecraftAccessSession(title: String, address: String, port: Int, accessMode: String, onResult: (Boolean, String) -> Unit) {
-        viewModelScope.launch {
-            runCatching { clientManager.getService().createMinecraftSession(NetworkMinecraftSessionRequest(title.trim(), address.trim(), port, accessMode)) }
-                .onSuccess { refreshConnectedAccountData(); onResult(true, "Minecraft session created") }
-                .onFailure { onResult(false, it.localizedMessage ?: "Could not create Minecraft session") }
-        }
-    }
 }

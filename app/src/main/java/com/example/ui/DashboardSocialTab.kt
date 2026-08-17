@@ -8,7 +8,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.PersonAdd
-import androidx.compose.material.icons.rounded.SportsEsports
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -17,24 +16,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
-/** Orvexa Orbit social panel: friends, blocks, groups and Minecraft access cards. */
+/** Orvexa Orbit social panel: friends, blocks and groups. Minecraft access belongs to Launcher. */
 @Composable
 fun DashboardSocialTab(viewModel: AccountViewModel) {
     val friends by viewModel.friends.collectAsStateWithLifecycle()
     val blocks by viewModel.serverBlocks.collectAsStateWithLifecycle()
     val groups by viewModel.groups.collectAsStateWithLifecycle()
-    val minecraftSessions by viewModel.minecraftSessions.collectAsStateWithLifecycle()
     var friendEmail by remember { mutableStateOf("") }
     var blockEmail by remember { mutableStateOf("") }
     var groupName by remember { mutableStateOf("") }
-    var sessionTitle by remember { mutableStateOf("") }
-    var sessionAddress by remember { mutableStateOf("") }
     var status by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) { viewModel.refreshConnectedAccountData() }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text("Social", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Text("Your shared Orvexa network and Minecraft access controls.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp, bottom = 16.dp))
+        Text("Friends, blocks and groups for your Orvexa account.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp, bottom = 16.dp))
         status?.let { Text(it, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(bottom = 12.dp)) }
 
         SocialCard(Icons.Rounded.PersonAdd, "Friends") {
@@ -60,12 +56,6 @@ fun DashboardSocialTab(viewModel: AccountViewModel) {
             OutlinedTextField(groupName, { groupName = it }, label = { Text("New group name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Button(onClick = { viewModel.createServerGroup(groupName, "") { _, message -> status = message; groupName = "" } }, enabled = groupName.isNotBlank(), modifier = Modifier.padding(top = 8.dp)) { Text("Create group") }
             groups.forEach { group -> Text("${group.name} · ${group.memberIds.size} members", modifier = Modifier.padding(top = 8.dp)) }
-        }
-        SocialCard(Icons.Rounded.SportsEsports, "Minecraft sessions") {
-            OutlinedTextField(sessionTitle, { sessionTitle = it }, label = { Text("Session name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(sessionAddress, { sessionAddress = it }, label = { Text("Server address") }, singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-            Button(onClick = { viewModel.createMinecraftAccessSession(sessionTitle, sessionAddress, 25565, "invite") { _, message -> status = message; sessionTitle = ""; sessionAddress = "" } }, enabled = sessionTitle.isNotBlank(), modifier = Modifier.padding(top = 8.dp)) { Text("Create invite-only session") }
-            minecraftSessions.forEach { session -> Text("${session.title} · ${session.address}:${session.port} · ${session.accessMode}", modifier = Modifier.padding(top = 8.dp)) }
         }
     }
 }

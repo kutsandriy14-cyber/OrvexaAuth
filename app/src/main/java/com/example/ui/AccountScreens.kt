@@ -1254,18 +1254,6 @@ fun DashboardHomeTab(
     viewModel: AccountViewModel,
     onNavigateToTab: (Int) -> Unit
 ) {
-    val files by viewModel.userFiles.collectAsStateWithLifecycle()
-
-    var showStorageDialog by remember { mutableStateOf(false) }
-
-    val totalSize = files.sumOf { it.size }
-    val totalSizeStr = formatSize(totalSize)
-    val baseQuota = if (user.dataQuotaMb > 0) user.dataQuotaMb else 512
-    val quotaMb = baseQuota
-    val maxBytes = quotaMb * 1024 * 1024L
-    val usePct = (totalSize.toFloat() / maxBytes.toFloat()).coerceIn(0f, 1f)
-    val pctStr = String.format("%.4f%%", usePct * 100)
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1273,7 +1261,7 @@ fun DashboardHomeTab(
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         // Big avatar
         val resolvedColor = if (user.avatarColor == -12543232 || user.avatarColor == 0) {
@@ -1284,7 +1272,7 @@ fun DashboardHomeTab(
         }
         Box(
             modifier = Modifier
-                .size(90.dp)
+                .size(76.dp)
                 .background(resolvedColor, CircleShape),
             contentAlignment = Alignment.Center
         ) {
@@ -1292,16 +1280,24 @@ fun DashboardHomeTab(
                 text = user.firstName.take(1).uppercase(),
                 color = Color.White,
                 fontWeight = FontWeight.Bold,
-                fontSize = 40.sp
+                fontSize = 32.sp
             )
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
         Text(
-            text = "Welcome, ${user.firstName}!",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Medium,
+            text = viewModel.t("account_home_kicker"),
+            style = MaterialTheme.typography.labelMedium,
+            color = Color(0xFF315DE5),
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.2.sp
+        )
+
+        Text(
+            text = "${viewModel.t("account_home_greeting")}, ${user.firstName}",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
             textAlign = TextAlign.Center
         )
 
@@ -1312,18 +1308,19 @@ fun DashboardHomeTab(
             textAlign = TextAlign.Center
         )
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(18.dp))
 
         // Info card 1
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 8.dp)
+                .padding(bottom = 10.dp)
                 .clickable { onNavigateToTab(1) },
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f))
         ) {
             Row(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier.padding(18.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
@@ -1353,12 +1350,13 @@ fun DashboardHomeTab(
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 8.dp)
+                .padding(bottom = 10.dp)
                 .clickable { onNavigateToTab(2) },
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f))
         ) {
             Row(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier.padding(18.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
@@ -1382,76 +1380,6 @@ fun DashboardHomeTab(
                 }
                 Icon(Icons.Rounded.ChevronRight, contentDescription = null)
             }
-        }
-
-        // Cloud Server Storage Indicator (512 MB allocated per account)
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp)
-                .clickable { showStorageDialog = true },
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.CloudQueue,
-                        contentDescription = null,
-                        tint = Color(0xFF34A853),
-                        modifier = Modifier.size(36.dp)
-                    )
-                    Spacer(modifier = Modifier.width(16.dp))
-                    Column {
-                        Text(
-                            text = viewModel.t("cloud_storage"),
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = viewModel.t("cloud_storage_desc"),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                LinearProgressIndicator(
-                    progress = { usePct.coerceAtLeast(0.001f) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(8.dp)
-                        .clip(RoundedCornerShape(4.dp)),
-                    color = Color(0xFF34A853),
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "$totalSizeStr of $quotaMb MB used",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        text = "$pctStr used",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF34A853)
-                    )
-                }
-            }
-        }
-
-        if (showStorageDialog) {
-            ServerStorageManagerDialog(viewModel = viewModel, onDismiss = { showStorageDialog = false })
         }
 
     }
@@ -1681,6 +1609,7 @@ fun DashboardSecurityTab(
     var newPassword by remember { mutableStateOf("") }
     var actionError by remember { mutableStateOf<String?>(null) }
     var actionSuccess by remember { mutableStateOf<String?>(null) }
+    var deletePassword by remember { mutableStateOf("") }
 
     // Passcode lock states
     val passcode by viewModel.appPasscode.collectAsStateWithLifecycle()
@@ -2041,28 +1970,50 @@ fun DashboardSecurityTab(
             )
         }
 
-        // Permanent Delete Confirmation Dialog
+        // Permanent deletion requires the current password; failed requests leave
+        // the authenticated session unchanged.
         if (showDeleteDialog) {
             AlertDialog(
-                onDismissRequest = { showDeleteDialog = false },
-                title = { Text("Delete Account permanently?") },
-                text = { Text("Are you sure you want to permanently delete your account? This will erase your profile, files, and chat messages from the public OrvexaAuth service. This action is irreversible.") },
+                onDismissRequest = { showDeleteDialog = false; deletePassword = "" },
+                title = { Text(viewModel.t("delete_confirm_title")) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(viewModel.t("delete_confirm_description"))
+                        OutlinedTextField(
+                            value = deletePassword,
+                            onValueChange = { deletePassword = it; actionError = null },
+                            label = { Text(viewModel.t("delete_password_label")) },
+                            singleLine = true,
+                            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            leadingIcon = { Icon(Icons.Rounded.Lock, contentDescription = null) },
+                            isError = actionError != null,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        actionError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                    }
+                },
                 confirmButton = {
                     Button(
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                         onClick = {
-                            viewModel.deleteAccount {
-                                showDeleteDialog = false
-                                onSignOut()
-                            }
+                            viewModel.deleteAccount(
+                                currentPassword = deletePassword,
+                                onSuccess = {
+                                    deletePassword = ""
+                                    showDeleteDialog = false
+                                    onSignOut()
+                                },
+                                onError = { actionError = it }
+                            )
                         }
                     ) {
-                        Text("Yes, Delete permanently")
+                        Text(viewModel.t("delete_confirm_action"))
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { showDeleteDialog = false }) {
-                        Text("Cancel")
+                    TextButton(onClick = { showDeleteDialog = false; deletePassword = "" }) {
+                        Text(viewModel.t("cancel"))
                     }
                 }
             )
@@ -2611,11 +2562,7 @@ fun PasscodeLockScreen(
     }
 }
 
-@Composable
-fun ServerStorageManagerDialog(
-    viewModel: AccountViewModel,
-    onDismiss: () -> Unit
-) {
+/* Legacy cloud storage implementation removed from the Android identity client.
     val files by viewModel.userFiles.collectAsStateWithLifecycle()
     val isLoading by viewModel.isStorageLoading.collectAsStateWithLifecycle()
 
@@ -2869,15 +2816,7 @@ fun ServerStorageManagerDialog(
             }
         )
     }
-}
-
-fun formatSize(bytes: Long): String {
-    return when {
-        bytes < 1024 -> "$bytes B"
-        bytes < 1024 * 1024 -> String.format("%.1f KB", bytes / 1024.0)
-        else -> String.format("%.1f MB", bytes / (1024.0 * 1024.0))
-    }
-}
+*/
 
 fun formatDate(millis: Long): String {
     val date = java.util.Date(millis)

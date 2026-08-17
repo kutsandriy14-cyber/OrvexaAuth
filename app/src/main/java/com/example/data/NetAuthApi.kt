@@ -144,32 +144,14 @@ interface NetAuthService {
         @Body request: NetworkUpdatePasswordRequest
     ): StatusResponse
 
-    @DELETE("api/users/{id}")
-    suspend fun deleteAccount(@Path("id") id: Int): StatusResponse
+    @HTTP(method = "DELETE", path = "api/users/{id}", hasBody = true)
+    suspend fun deleteAccount(
+        @Path("id") id: Int,
+        @Body request: NetworkDeleteAccountRequest
+    ): StatusResponse
 
     @GET("api/users")
     suspend fun getUsers(): List<NetworkUserResponse>
-
-    @GET("api/users/{id}/storage")
-    suspend fun getFiles(@Path("id") id: Int): List<NetworkFileResponse>
-
-    @GET("api/users/{id}/storage/{fileName}")
-    suspend fun downloadFile(
-        @Path("id") id: Int,
-        @Path("fileName") fileName: String
-    ): okhttp3.ResponseBody
-
-    @POST("api/users/{id}/storage")
-    suspend fun uploadFile(
-        @Path("id") id: Int,
-        @Body request: NetworkUploadFileRequest
-    ): StatusResponse
-
-    @DELETE("api/users/{id}/storage/{fileName}")
-    suspend fun deleteFile(
-        @Path("id") id: Int,
-        @Path("fileName") fileName: String
-    ): StatusResponse
 
     @GET("api/messages")
     suspend fun getMessages(
@@ -246,15 +228,6 @@ interface NetAuthService {
     @POST("api/groups/{groupId}/messages")
     suspend fun sendGroupMessage(@Path("groupId") groupId: String, @Body request: NetworkGroupMessageRequest): NetworkGroupMessage
 
-    @GET("api/minecraft/sessions")
-    suspend fun getMinecraftSessions(): List<NetworkMinecraftSession>
-
-    @POST("api/minecraft/sessions")
-    suspend fun createMinecraftSession(@Body request: NetworkMinecraftSessionRequest): NetworkMinecraftSession
-
-    @POST("api/minecraft/sessions/{sessionId}/join-check")
-    suspend fun checkMinecraftAccess(@Path("sessionId") sessionId: String): NetworkMinecraftAccessCheck
-
     @POST("api/database/clear")
     suspend fun clearDatabase(): StatusResponse
 }
@@ -278,20 +251,8 @@ data class SendMessageRequest(
     val text: String
 )
 
-data class NetworkFileResponse(
-    val name: String,
-    val size: Long,
-    @com.squareup.moshi.Json(name = "updatedAt") val updatedAtCamel: Long? = null,
-    @com.squareup.moshi.Json(name = "updated_at") val updatedAtSnake: Long? = null
-) {
-    val updatedAt: Long get() = updatedAtCamel ?: updatedAtSnake ?: 0L
-}
-
-data class NetworkUploadFileRequest(
-    val fileName: String,
-    val content: String = "",
-    val contentBase64: String = ""
-)
+/** The API receives a SHA-256 value, never the raw current password. */
+data class NetworkDeleteAccountRequest(val passwordHash: String)
 
 data class NetworkQrCreateRequest(
     val deviceName: String = "OrvexaAuth Android",
@@ -367,25 +328,6 @@ data class NetworkGroup(
 )
 data class NetworkGroupMessage(val id: Int, val senderId: String, val text: String, val timestamp: Long)
 data class NetworkGroupMessageRequest(val text: String)
-
-data class NetworkMinecraftSessionRequest(
-    val title: String,
-    val address: String = "",
-    val port: Int = 25565,
-    val accessMode: String = "invite"
-)
-data class NetworkMinecraftSession(
-    val id: String,
-    val ownerId: String,
-    val title: String,
-    val address: String = "",
-    val port: Int = 25565,
-    val accessMode: String = "invite",
-    val allowedUserIds: List<String> = emptyList(),
-    val createdAt: Long,
-    val updatedAt: Long
-)
-data class NetworkMinecraftAccessCheck(val allowed: Boolean, val sessionId: String, val accessMode: String)
 
 // Client configuration & dynamic Retrofit manager
 class NetAuthClientManager(private val context: Context) {

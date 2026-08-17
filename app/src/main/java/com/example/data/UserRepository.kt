@@ -28,8 +28,8 @@ class UserRepository(
         userDao.updateUser(user)
     }
 
-    suspend fun deleteUser(user: User) {
-        userDao.deleteUser(user)
+    suspend fun deleteUser(user: User, currentPasswordHash: String) {
+        userDao.deleteUser(user, currentPasswordHash)
     }
 
     // Messaging operations

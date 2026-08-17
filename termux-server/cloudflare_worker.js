@@ -240,6 +240,187 @@ async function sessionAllowsMinecraft(kv, dbName, minecraftSession, userId) {
   return minecraftSession.accessMode === "friends" && areFriends(kv, dbName, minecraftSession.ownerId, userId);
 }
 
+async function hasAdminAccess(request, env) {
+  const configuredSecret = String(env?.ADMIN_SECRET || "");
+  const header = request.headers.get("Authorization") || "";
+  const match = header.match(/^Admin\s+(.+)$/i);
+  if (!configuredSecret || !match) return false;
+
+  const suppliedSecret = match[1].trim();
+  if (suppliedSecret.length !== configuredSecret.length) return false;
+  let difference = 0;
+  for (let index = 0; index < suppliedSecret.length; index++) {
+    difference |= suppliedSecret.charCodeAt(index) ^ configuredSecret.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
+async function listAllKeys(kv, prefix) {
+  const keys = [];
+  let cursor;
+  do {
+    const page = await kv.list({ prefix, cursor });
+    keys.push(...page.keys);
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return keys;
+}
+
+async function listUserSessions(kv, dbName, userId) {
+  const sessionKeys = await listAllKeys(kv, `${dbName}:session:`);
+  const sessions = [];
+  for (const keyInfo of sessionKeys) {
+    const raw = await kv.get(keyInfo.name);
+    if (!raw) continue;
+    try {
+      const session = JSON.parse(raw);
+      if (String(session.userId) !== String(userId)) continue;
+      sessions.push({
+        tokenHint: keyInfo.name.substring(`${dbName}:session:`.length).slice(-8),
+        createdAt: session.createdAt,
+        expiresAt: session.expiresAt,
+        active: Number(session.expiresAt || 0) > Date.now(),
+        deviceName: session.deviceName || "",
+        deviceType: session.deviceType || "unknown",
+        appName: session.appName || "Unknown_App"
+      });
+    } catch (_error) {}
+  }
+  return sessions.sort((left, right) => Number(right.createdAt || 0) - Number(left.createdAt || 0));
+}
+
+async function deleteUserRecords(kv, dbName, user) {
+  const userId = String(user.id);
+  const userKey = `${dbName}:user:${userId}`;
+  await kv.delete(userKey);
+  await kv.delete(`${dbName}:email_to_id:${String(user.email || "").toLowerCase()}`);
+
+  for (const keyInfo of await listAllKeys(kv, `${dbName}:file:${userId}:`)) await kv.delete(keyInfo.name);
+  for (const keyInfo of await listAllKeys(kv, `${dbName}:security_events:${userId}`)) await kv.delete(keyInfo.name);
+  for (const keyInfo of await listAllKeys(kv, `${dbName}:notifications:${userId}`)) await kv.delete(keyInfo.name);
+
+  for (const keyInfo of await listAllKeys(kv, `${dbName}:session:`)) {
+    const raw = await kv.get(keyInfo.name);
+    try {
+      if (raw && String(JSON.parse(raw).userId) === userId) await kv.delete(keyInfo.name);
+    } catch (_error) {}
+  }
+
+  for (const keyInfo of await listAllKeys(kv, `${dbName}:friend:`)) {
+    const raw = await kv.get(keyInfo.name);
+    try {
+      const relation = raw && JSON.parse(raw);
+      if (relation && (String(relation.requesterId) === userId || String(relation.targetId) === userId)) await kv.delete(keyInfo.name);
+    } catch (_error) {}
+  }
+
+  for (const keyInfo of await listAllKeys(kv, `${dbName}:block:`)) {
+    const raw = await kv.get(keyInfo.name);
+    try {
+      const block = raw && JSON.parse(raw);
+      if (block && (String(block.userId) === userId || String(block.targetId) === userId)) await kv.delete(keyInfo.name);
+    } catch (_error) {}
+  }
+
+  for (const keyInfo of await listAllKeys(kv, `${dbName}:group:`)) {
+    const raw = await kv.get(keyInfo.name);
+    try {
+      const group = raw && JSON.parse(raw);
+      if (!group || !Array.isArray(group.memberIds) || !group.memberIds.map(String).includes(userId)) continue;
+      if (String(group.ownerId) === userId) {
+        await kv.delete(keyInfo.name);
+        await kv.delete(`${dbName}:group_chat:${group.id}`);
+      } else {
+        group.memberIds = group.memberIds.map(String).filter(memberId => memberId !== userId);
+        await kv.put(keyInfo.name, JSON.stringify(group));
+      }
+    } catch (_error) {}
+  }
+
+  for (const keyInfo of await listAllKeys(kv, `${dbName}:minecraft_session:`)) {
+    const raw = await kv.get(keyInfo.name);
+    try {
+      const session = raw && JSON.parse(raw);
+      if (!session) continue;
+      if (String(session.ownerId) === userId) {
+        await kv.delete(keyInfo.name);
+      } else if (Array.isArray(session.allowedUserIds) && session.allowedUserIds.map(String).includes(userId)) {
+        session.allowedUserIds = session.allowedUserIds.map(String).filter(allowedId => allowedId !== userId);
+        await kv.put(keyInfo.name, JSON.stringify(session));
+      }
+    } catch (_error) {}
+  }
+}
+
+async function handleAdminRequest(request, url, kv, dbName) {
+  const path = url.pathname;
+  const method = request.method;
+  const userMatch = path.match(/^\/api\/admin\/users\/([^/]+)$/);
+  const sessionMatch = path.match(/^\/api\/admin\/users\/([^/]+)\/sessions$/);
+  const banMatch = path.match(/^\/api\/admin\/users\/([^/]+)\/ban$/);
+
+  if (path === "/api/admin/stats" && method === "GET") {
+    const userKeys = await listAllKeys(kv, `${dbName}:user:`);
+    const sessionKeys = await listAllKeys(kv, `${dbName}:session:`);
+    let activeSessions = 0;
+    for (const keyInfo of sessionKeys) {
+      const raw = await kv.get(keyInfo.name);
+      try { if (raw && Number(JSON.parse(raw).expiresAt || 0) > Date.now()) activeSessions++; } catch (_error) {}
+    }
+    return jsonResponse({ users: userKeys.length, sessions: sessionKeys.length, activeSessions, generatedAt: Date.now() });
+  }
+
+  if (path === "/api/admin/users" && method === "GET") {
+    const query = String(url.searchParams.get("query") || "").trim().toLowerCase();
+    const userKeys = await listAllKeys(kv, `${dbName}:user:`);
+    const users = [];
+    for (const keyInfo of userKeys) {
+      const raw = await kv.get(keyInfo.name);
+      try {
+        const user = raw && JSON.parse(raw);
+        if (!user) continue;
+        const searchable = `${user.id} ${user.email || ""} ${user.firstName || ""} ${user.lastName || ""}`.toLowerCase();
+        if (!query || searchable.includes(query)) users.push(sanitizeUser(user));
+      } catch (_error) {}
+    }
+    users.sort((left, right) => Number(right.createdAt || 0) - Number(left.createdAt || 0));
+    return jsonResponse({ users, total: users.length });
+  }
+
+  if (sessionMatch && method === "GET") {
+    const user = await readUser(kv, dbName, sessionMatch[1]);
+    if (!user) return errorResponse("User not found", 404);
+    return jsonResponse({ user: sanitizeUser(user), sessions: await listUserSessions(kv, dbName, user.id) });
+  }
+
+  if (banMatch && method === "PUT") {
+    const user = await readUser(kv, dbName, banMatch[1]);
+    if (!user) return errorResponse("User not found", 404);
+    const body = await request.json();
+    user.isBanned = Boolean(body.banned);
+    user.banReason = user.isBanned ? String(body.reason || "Administrative restriction").slice(0, 500) : "";
+    user.bannedAt = user.isBanned ? Date.now() : null;
+    await kv.put(`${dbName}:user:${user.id}`, JSON.stringify(user));
+    if (user.isBanned) {
+      const allSessionKeys = await listAllKeys(kv, `${dbName}:session:`);
+      for (const keyInfo of allSessionKeys) {
+        const raw = await kv.get(keyInfo.name);
+        try { if (raw && String(JSON.parse(raw).userId) === String(user.id)) await kv.delete(keyInfo.name); } catch (_error) {}
+      }
+    }
+    return jsonResponse({ status: "success", user: sanitizeUser(user) });
+  }
+
+  if (userMatch && method === "DELETE") {
+    const user = await readUser(kv, dbName, userMatch[1]);
+    if (!user) return errorResponse("User not found", 404);
+    await deleteUserRecords(kv, dbName, user);
+    return jsonResponse({ status: "success", deletedUserId: String(user.id) });
+  }
+
+  return errorResponse("Admin route not found", 404);
+}
+
 async function handleFetch(request, env = {}, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -276,6 +457,16 @@ async function handleFetch(request, env = {}, ctx) {
       });
     }
 
+    if (path.startsWith("/api/admin/")) {
+      if (!(await hasAdminAccess(request, env))) return errorResponse("Forbidden: valid administrator credentials are required", 403);
+      try {
+        return await handleAdminRequest(request, url, kv, dbName);
+      } catch (error) {
+        console.error("OrvexaAuth admin route error", error);
+        return errorResponse("Administrative request failed", 500);
+      }
+    }
+
     // Verify service key for all other secure endpoints
     if (!checkServiceKey(request)) {
       return errorResponse("Unauthorized: Invalid or missing X-Service-Key header", 403);
@@ -293,25 +484,16 @@ async function handleFetch(request, env = {}, ctx) {
     if (!isPublicRoute && !authSession) {
       return errorResponse("Unauthorized: a valid Bearer session is required", 401);
     }
+    if (authSession) {
+      const sessionUser = await readUser(kv, dbName, authSession.userId);
+      if (!sessionUser) return errorResponse("Unauthorized: account no longer exists", 401);
+      if (sessionUser.isBanned) return errorResponse("Account is restricted", 403);
+    }
 
     try {
-      // 1. GET ALL USERS
+      // User enumeration is an administrator-only operation.
       if (path === "/api/users" && method === "GET") {
-        const listPrefix = `${dbName}:user:`;
-        const listResult = await kv.list({ prefix: listPrefix });
-        const users = [];
-        
-        for (const keyInfo of listResult.keys) {
-          const rawUser = await kv.get(keyInfo.name);
-          if (rawUser) {
-            try {
-              const u = JSON.parse(rawUser);
-              delete u.passwordHash; // Exclude sensitive hashes from listing
-              users.push(u);
-            } catch (e) {}
-          }
-        }
-        return jsonResponse(users);
+        return errorResponse("Forbidden: use the administrator API", 403);
       }
 
       // 2. REGISTER USER
@@ -389,6 +571,9 @@ async function handleFetch(request, env = {}, ctx) {
         const profileData = JSON.parse(rawUser);
         if (profileData.passwordHash !== passwordHash) {
           return errorResponse("Invalid password", 401);
+        }
+        if (profileData.isBanned) {
+          return errorResponse("Account is restricted", 403);
         }
         if (profileData.totpSecret && !(await verifyTotp(profileData.totpSecret, body.totpCode))) {
           return errorResponse("Two-factor authentication code is required or invalid", 428);
@@ -906,7 +1091,7 @@ async function handleFetch(request, env = {}, ctx) {
       }
 
       // 6. DELETE USER
-      if (path.startsWith("/api/users/") && method === "DELETE" && !path.includes("/storage")) {
+      if (/^\/api\/users\/[^/]+$/.test(path) && method === "DELETE") {
         const userId = path.split("/")[3];
         if (String(authSession.userId) != String(userId)) return errorResponse("Forbidden", 403);
         const userKey = `${dbName}:user:${userId}`;
@@ -914,22 +1099,13 @@ async function handleFetch(request, env = {}, ctx) {
         if (!rawUser) {
           return errorResponse("User not found", 404);
         }
-
+        const body = await request.json();
         const profileData = JSON.parse(rawUser);
-        const emailKey = `${dbName}:email_to_id:${profileData.email}`;
-
-        // Delete user & mapping
-        await kv.delete(userKey);
-        await kv.delete(emailKey);
-
-        // Delete all associated files
-        const filePrefix = `${dbName}:file:${userId}:`;
-        const fileList = await kv.list({ prefix: filePrefix });
-        for (const f of fileList.keys) {
-          await kv.delete(f.name);
+        if (!body.passwordHash || body.passwordHash !== profileData.passwordHash) {
+          return errorResponse("Current password is incorrect", 401);
         }
-
-        return jsonResponse({ status: "success", message: "User account and files deleted successfully" }, 200);
+        await deleteUserRecords(kv, dbName, profileData);
+        return jsonResponse({ status: "success", message: "User account deleted" }, 200);
       }
 
       // 7. LIST FILES
@@ -1107,9 +1283,11 @@ async function handleFetch(request, env = {}, ctx) {
     }
   }
 
-addEventListener("fetch", event => {
-  event.respondWith(handleFetch(event.request, {}, event));
-});
+export default {
+  fetch(request, env, ctx) {
+    return handleFetch(request, env, ctx);
+  }
+};
 
 // Logging function to save history
 async function logAppEvent(kv, dbName, email, action, appNameInput) {
