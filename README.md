@@ -10,7 +10,7 @@ The beta uses a single public Cloudflare Worker API endpoint:
 
 The Android client is **Cloudflare-only**. It has no local server mode, no saved server endpoint, no LAN discovery, no Firebase, no Google Sign-In and no Google Drive synchronization. Transport uses HTTPS/TLS, while sensitive local session material is encrypted with Android Keystore and excluded from Android backup rules.
 
-Registration for a PC account is provided by the existing Orvexa web registration flow. The Android client is intended for sign-in, account security and companion features rather than hosting a local authentication server.
+Registration for a PC account is provided by the OrvexaAuth web client. The Android client is intended for sign-in, account security and companion features rather than hosting a local authentication server.
 
 ## Android build
 
@@ -44,7 +44,11 @@ The Worker source is in `termux-server/cloudflare_worker.js`. Deploy it with Wra
 
 After a successful login or registration, the Worker returns a short-lived profile response together with a server-issued `sessionToken`. The Android client stores only that token in Android Keystore and automatically sends it as `Authorization: Bearer <token>`. Password hashes are used only during credential exchange and are not persisted as session material. Sessions expire after 30 days, can be validated with `GET /api/sessions/{token}`, revoked with `DELETE /api/sessions/{token}`, listed for the current account through `GET /api/users/{id}/sessions`, or terminated for all devices with `DELETE /api/users/{id}/sessions`.
 
-Authenticated social routes currently include friend requests and acceptance (`/api/friends/request`, `/api/friends/{id}`, `/api/friends/{id}/accept`), block management (`/api/blocks`), profile presence (`GET /api/users/{id}`), group creation and membership (`/api/groups`), and group messages (`/api/groups/{id}/messages`). These endpoints are beta APIs and require the bearer token; no API key or service secret is embedded in the Android or C++ client.
+Authenticated social routes currently include friend requests and acceptance (`/api/friends/request`, `/api/friends/{id}`, `/api/friends/{id}/accept`), block management (`/api/blocks`), profile presence (`GET /api/users/{id}`), group creation and membership (`/api/groups`), group messages (`/api/groups/{id}/messages`), personal messages (`/api/messages`) and Minecraft-session access control (`/api/minecraft/sessions`). These endpoints are beta APIs and require the bearer token; no API key or service secret is embedded in the Android, web or C++ client.
+
+### QR sign-in between phone and desktop
+
+The desktop client creates a five-minute request through `POST /api/qr/sessions` and receives an `approveUrl` in the form `orvexaauth://qr/approve?request=<id>`. Opening that URL on an Android device with OrvexaAuth transfers the request identifier to the app. The already authenticated mobile app confirms the request with its bearer session; the desktop client then polls `GET /api/qr/sessions/{id}` and receives a new server-issued token only after approval. The QR request itself contains no password and does not persist a token in the Launcher settings file.
 
 ## GitHub workflow
 

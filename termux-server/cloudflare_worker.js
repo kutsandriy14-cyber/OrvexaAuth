@@ -445,7 +445,10 @@ async function handleFetch(request, env = {}, ctx) {
           appName: String(body.appName || "OrvexaAuth Web").slice(0, 120)
         };
         await kv.put(`${dbName}:qr:${requestId}`, JSON.stringify(qrRequest), { expirationTtl: 5 * 60 });
-        return jsonResponse({ requestId, status: qrRequest.status, expiresAt, approveUrl: `orvexaauth://qr/${requestId}` }, 201);
+        // The Android client handles this documented deep link and then calls the
+        // authenticated approval endpoint. Keep the QR payload stable across web
+        // and desktop clients instead of exposing an API-shaped pseudo URL.
+        return jsonResponse({ requestId, status: qrRequest.status, expiresAt, approveUrl: `orvexaauth://qr/approve?request=${encodeURIComponent(requestId)}` }, 201);
       }
 
       if (/^\/api\/qr\/sessions\/[^/]+$/.test(path) && method === "GET") {
