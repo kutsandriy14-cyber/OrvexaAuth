@@ -10,8 +10,7 @@ const metadata = {
     { name: 'ADMIN_SECRET', type: 'inherit' },
     { name: 'ORVEXAAUTH_KV', type: 'kv_namespace', namespace_id: 'e4ed575dddd64d67a58226ae1b967f09' },
     { name: 'LAN_RELAY', type: 'durable_object_namespace', class_name: 'LanRelay' }
-  ],
-  migrations: { tag: 'orvexaauth-lan-relay-v1', new_sqlite_classes: ['LanRelay'] }
+  ]
 };
 const multipart = [
   `--${boundary}`,

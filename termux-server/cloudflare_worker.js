@@ -299,7 +299,7 @@ function lanRelayUrl(request, sessionId, ticket) {
   return url.toString();
 }
 
-async function issueLanTicket(kv, dbName, lanSession, userId, role) {
+async function issueLanTicket(env, dbName, lanSession, userId, role) {
   const ticket = crypto.randomUUID();
   const createdAt = Date.now();
   const expiresAt = Math.min(createdAt + LAN_TICKET_TTL_SECONDS * 1000, Number(lanSession.expiresAt));
@@ -313,9 +313,7 @@ async function issueLanTicket(kv, dbName, lanSession, userId, role) {
     createdAt,
     expiresAt
   };
-  await kv.put(lanTicketKey(dbName, ticket), JSON.stringify(ticketRecord), {
-    expirationTtl: Math.max(1, Math.ceil((expiresAt - createdAt) / 1000))
-  });
+  await registerLanRelayTicket(env, dbName, lanSession.id, ticketRecord);
   return ticketRecord;
 }
 
@@ -327,6 +325,17 @@ async function initialiseLanRelay(env, dbName, lanSession) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ dbName, sessionId: lanSession.id, expiresAt: lanSession.expiresAt })
   });
+}
+
+async function registerLanRelayTicket(env, dbName, sessionId, ticketRecord) {
+  if (!env.LAN_RELAY) throw new Error("LAN relay is not configured");
+  const relay = env.LAN_RELAY.get(lanRelayId(env, dbName, sessionId));
+  const response = await relay.fetch("https://lan-relay.internal/ticket", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(ticketRecord)
+  });
+  if (!response.ok) throw new Error(`Unable to register LAN relay ticket (${response.status})`);
 }
 
 async function closeLanRelay(env, dbName, sessionId, code = 4001, reason = "LAN session closed") {
@@ -564,6 +573,15 @@ async function handleFetch(request, env = {}, ctx) {
     const dbName = (request.headers.get("X-Database-Name") || "default")
       .trim()
       .replace(/[^a-zA-Z0-9_-]/g, "") || "default";
+
+    // LAN relay tickets are verified inside the Durable Object. They must not pass the
+    // REST service-key and bearer-session checks because a Minecraft TCP bridge only has
+    // the short-lived, one-time relay ticket embedded in its WSS address.
+    if (/^\/api\/lan\/relay\/[^/]+$/.test(path)) {
+      const sessionId = path.split("/")[4];
+      if (!env.LAN_RELAY) return errorResponse("LAN relay is not configured", 503);
+      return env.LAN_RELAY.get(lanRelayId(env, dbName, sessionId)).fetch(request);
+    }
 
     // Allow status check without service key
     if (path === "/api/status" && method === "GET") {
@@ -1207,7 +1225,7 @@ async function handleFetch(request, env = {}, ctx) {
         await initialiseLanRelay(env, dbName, lanSession);
         await writeUserEvent(kv, dbName, authSession.userId, "lan_session_created", request,
                              { sessionId: lanSession.id, title }, env, ctx);
-        const hostTicket = await issueLanTicket(kv, dbName, lanSession, authSession.userId, "host");
+        const hostTicket = await issueLanTicket(env, dbName, lanSession, authSession.userId, "host");
         return jsonResponse({
           session: { ...publicLanSession(lanSession), isHost: true, allowedUserIds },
           hostTicket: hostTicket.ticket,
@@ -1269,7 +1287,7 @@ async function handleFetch(request, env = {}, ctx) {
         if (String(lanSession.hostUserId) !== String(authSession.userId)) {
           return errorResponse("Only the LAN host can request a host ticket", 403);
         }
-        const ticket = await issueLanTicket(kv, dbName, lanSession, authSession.userId, "host");
+        const ticket = await issueLanTicket(env, dbName, lanSession, authSession.userId, "host");
         return jsonResponse({ sessionId, role: "host", ticket: ticket.ticket, expiresAt: ticket.expiresAt,
                               relayUrl: lanRelayUrl(request, sessionId, ticket.ticket) });
       }
@@ -1284,7 +1302,7 @@ async function handleFetch(request, env = {}, ctx) {
         if (!(await sessionAllowsLan(kv, dbName, lanSession, authSession.userId))) {
           return errorResponse("You do not have access to this LAN session", 403);
         }
-        const ticket = await issueLanTicket(kv, dbName, lanSession, authSession.userId, "guest");
+        const ticket = await issueLanTicket(env, dbName, lanSession, authSession.userId, "guest");
         await writeUserEvent(kv, dbName, authSession.userId, "lan_join_ticket_issued", request,
                              { sessionId, title: lanSession.title }, env, ctx);
         return jsonResponse({ sessionId, role: "guest", ticket: ticket.ticket, expiresAt: ticket.expiresAt,
@@ -1620,23 +1638,35 @@ export class LanRelay {
       return new Response(null, { status: 204 });
     }
 
+    if (url.pathname === "/ticket" && request.method === "POST") {
+      const ticket = await request.json();
+      const sessionMeta = await this.getSessionMeta();
+      if (!sessionMeta || String(ticket?.dbName) !== sessionMeta.dbName || String(ticket?.sessionId) !== sessionMeta.sessionId ||
+          !ticket?.ticket || !['host', 'guest'].includes(ticket?.role) || Number(ticket?.expiresAt) <= Date.now()) {
+        return new Response("Invalid LAN relay ticket", { status: 400 });
+      }
+      await this.state.storage.put(`ticket:${ticket.ticket}`, {
+        ticket: String(ticket.ticket),
+        dbName: String(ticket.dbName),
+        sessionId: String(ticket.sessionId),
+        userId: String(ticket.userId),
+        role: String(ticket.role),
+        createdAt: Number(ticket.createdAt),
+        expiresAt: Number(ticket.expiresAt)
+      });
+      return new Response(null, { status: 204 });
+    }
+
     if (request.headers.get("Upgrade") !== "websocket") return new Response("WebSocket upgrade required", { status: 426 });
     const ticketValue = String(url.searchParams.get("ticket") || "").trim();
     if (!ticketValue) return new Response("LAN relay ticket is required", { status: 401 });
 
-    const ticketRaw = await this.env.ORVEXAAUTH_KV.get(`${(await this.getSessionMeta())?.dbName}:lan_ticket:${ticketValue}`);
-    if (!ticketRaw) return new Response("LAN relay ticket was not found or has expired", { status: 401 });
-    let ticket;
-    try { ticket = JSON.parse(ticketRaw); } catch (_error) { return new Response("Invalid LAN relay ticket", { status: 401 }); }
     const sessionMeta = await this.getSessionMeta();
-    if (!sessionMeta || sessionMeta.sessionId !== ticket.sessionId || Number(ticket.expiresAt) <= Date.now()) {
+    if (!sessionMeta) return new Response("LAN relay session is not initialized", { status: 404 });
+    const ticket = await this.state.storage.get(`ticket:${ticketValue}`);
+    if (!ticket || sessionMeta.sessionId !== ticket.sessionId || Number(ticket.expiresAt) <= Date.now()) {
       return new Response("LAN relay ticket is no longer valid", { status: 401 });
     }
-    const lanSessionRaw = await this.env.ORVEXAAUTH_KV.get(`${ticket.dbName}:lan_session:${ticket.sessionId}`);
-    if (!lanSessionRaw) return new Response("LAN session is no longer active", { status: 404 });
-    let lanSession;
-    try { lanSession = JSON.parse(lanSessionRaw); } catch (_error) { return new Response("Invalid LAN session", { status: 404 }); }
-    if (lanSession.state !== "open" || Number(lanSession.expiresAt) <= Date.now()) return new Response("LAN session has expired", { status: 410 });
     if ((ticket.role === "host" && this.hostSocket) || (ticket.role === "guest" && this.guestSocket)) {
       return new Response("This LAN session role is already connected", { status: 409 });
     }
@@ -1644,7 +1674,7 @@ export class LanRelay {
 
     // Durable Objects serialize events, so deleting after the occupancy check
     // makes the ticket one-time even when the caller retries rapidly.
-    await this.env.ORVEXAAUTH_KV.delete(`${ticket.dbName}:lan_ticket:${ticketValue}`);
+    await this.state.storage.delete(`ticket:${ticketValue}`);
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.accept();
