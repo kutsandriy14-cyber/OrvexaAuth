@@ -67,6 +67,22 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
     private val _isStorageLoading = MutableStateFlow(false)
     val isStorageLoading: StateFlow<Boolean> = _isStorageLoading.asStateFlow()
 
+    // Security and social data are server-driven and are never persisted as local authority.
+    private val _activeSessions = MutableStateFlow<List<NetworkDeviceSession>>(emptyList())
+    val activeSessions: StateFlow<List<NetworkDeviceSession>> = _activeSessions.asStateFlow()
+    private val _securityEvents = MutableStateFlow<List<NetworkSecurityEvent>>(emptyList())
+    val securityEvents: StateFlow<List<NetworkSecurityEvent>> = _securityEvents.asStateFlow()
+    private val _notifications = MutableStateFlow<List<NetworkNotification>>(emptyList())
+    val notifications: StateFlow<List<NetworkNotification>> = _notifications.asStateFlow()
+    private val _friends = MutableStateFlow<List<NetworkFriendRelation>>(emptyList())
+    val friends: StateFlow<List<NetworkFriendRelation>> = _friends.asStateFlow()
+    private val _serverBlocks = MutableStateFlow<List<NetworkBlockRelation>>(emptyList())
+    val serverBlocks: StateFlow<List<NetworkBlockRelation>> = _serverBlocks.asStateFlow()
+    private val _groups = MutableStateFlow<List<NetworkGroup>>(emptyList())
+    val groups: StateFlow<List<NetworkGroup>> = _groups.asStateFlow()
+    private val _minecraftSessions = MutableStateFlow<List<NetworkMinecraftSession>>(emptyList())
+    val minecraftSessions: StateFlow<List<NetworkMinecraftSession>> = _minecraftSessions.asStateFlow()
+
     // Current logged-in user state
     private val _loggedInUser = MutableStateFlow<User?>(null)
     val loggedInUser: StateFlow<User?> = _loggedInUser.asStateFlow()
@@ -90,6 +106,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                     if (validForUser) {
                         _loggedInUser.value = savedUser
                         loadUserFiles()
+                        refreshConnectedAccountData()
                     } else {
                         clientManager.clearSession()
                         clientManager.clearLoggedInUser()
@@ -1210,6 +1227,132 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
             } catch (e: Exception) {
                 onResult(false, e.localizedMessage ?: "Failed to clear database partition")
             }
+        }
+    }
+
+    fun refreshConnectedAccountData() {
+        val user = _loggedInUser.value ?: return
+        viewModelScope.launch {
+            val api = clientManager.getService()
+            runCatching { api.getActiveSessions(user.id) }.onSuccess { _activeSessions.value = it }
+            runCatching { api.getSecurityEvents(user.id) }.onSuccess { _securityEvents.value = it }
+            runCatching { api.getNotifications(user.id) }.onSuccess { _notifications.value = it }
+            runCatching { api.getFriends(user.id) }.onSuccess { _friends.value = it }
+            runCatching { api.getBlocks(user.id) }.onSuccess {
+                _serverBlocks.value = it
+                val emails = it.mapNotNull { relation -> relation.user?.email?.trim()?.lowercase() }.toSet()
+                clientManager.blockedUsers = emails
+                _blockedUsers.value = emails
+            }
+            runCatching { api.getGroups() }.onSuccess { _groups.value = it }
+            runCatching { api.getMinecraftSessions() }.onSuccess { _minecraftSessions.value = it }
+        }
+    }
+
+    fun approveQrLogin(requestId: String, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            runCatching { clientManager.getService().approveQrSession(requestId) }
+                .onSuccess { onResult(true, "Desktop login approved") }
+                .onFailure { onResult(false, it.localizedMessage ?: "Could not approve QR login") }
+        }
+    }
+
+    fun beginTotpSetup(onResult: (NetworkTotpSetupResponse?, String?) -> Unit) {
+        val user = _loggedInUser.value ?: return onResult(null, "Not logged in")
+        viewModelScope.launch {
+            runCatching { clientManager.getService().setupTotp(user.id) }
+                .onSuccess { onResult(it, null) }
+                .onFailure { onResult(null, it.localizedMessage ?: "Could not start 2FA setup") }
+        }
+    }
+
+    fun confirmTotp(code: String, onResult: (Boolean, String) -> Unit) {
+        val user = _loggedInUser.value ?: return onResult(false, "Not logged in")
+        viewModelScope.launch {
+            runCatching { clientManager.getService().confirmTotp(user.id, NetworkVerificationCodeRequest(code.trim())) }
+                .onSuccess { onResult(true, "Two-factor protection enabled") }
+                .onFailure { onResult(false, it.localizedMessage ?: "Invalid code") }
+        }
+    }
+
+    fun disableTotp(code: String, onResult: (Boolean, String) -> Unit) {
+        val user = _loggedInUser.value ?: return onResult(false, "Not logged in")
+        viewModelScope.launch {
+            runCatching { clientManager.getService().disableTotp(user.id, NetworkVerificationCodeRequest(code.trim())) }
+                .onSuccess { onResult(true, "Two-factor protection disabled") }
+                .onFailure { onResult(false, it.localizedMessage ?: "Invalid code") }
+        }
+    }
+
+    fun revokeAllServerSessions(onResult: (Boolean, String) -> Unit) {
+        val user = _loggedInUser.value ?: return onResult(false, "Not logged in")
+        viewModelScope.launch {
+            runCatching { clientManager.getService().revokeAllSessions(user.id) }
+                .onSuccess {
+                    _activeSessions.value = emptyList()
+                    clientManager.clearSession()
+                    clientManager.clearLoggedInUser()
+                    _loggedInUser.value = null
+                    onResult(true, "All server sessions have been closed")
+                }
+                .onFailure { onResult(false, it.localizedMessage ?: "Could not close sessions") }
+        }
+    }
+
+    fun requestFriend(email: String, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            runCatching { clientManager.getService().requestFriend(NetworkFriendRequest(targetEmail = email.trim())) }
+                .onSuccess { refreshConnectedAccountData(); onResult(true, "Friend request sent") }
+                .onFailure { onResult(false, it.localizedMessage ?: "Could not send friend request") }
+        }
+    }
+
+    fun acceptFriend(requesterId: String, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            runCatching { clientManager.getService().acceptFriend(requesterId) }
+                .onSuccess { refreshConnectedAccountData(); onResult(true, "Friend request accepted") }
+                .onFailure { onResult(false, it.localizedMessage ?: "Could not accept friend request") }
+        }
+    }
+
+    fun removeFriendServer(otherId: String, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            runCatching { clientManager.getService().removeFriend(otherId) }
+                .onSuccess { refreshConnectedAccountData(); onResult(true, "Friend removed") }
+                .onFailure { onResult(false, it.localizedMessage ?: "Could not remove friend") }
+        }
+    }
+
+    fun blockUserServer(email: String, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            runCatching { clientManager.getService().blockUser(NetworkBlockRequest(targetEmail = email.trim())) }
+                .onSuccess { refreshConnectedAccountData(); onResult(true, "User blocked") }
+                .onFailure { onResult(false, it.localizedMessage ?: "Could not block user") }
+        }
+    }
+
+    fun unblockUserServer(targetId: String, onResult: (Boolean, String) -> Unit) {
+        val user = _loggedInUser.value ?: return onResult(false, "Not logged in")
+        viewModelScope.launch {
+            runCatching { clientManager.getService().unblockUser(user.id, targetId) }
+                .onSuccess { refreshConnectedAccountData(); onResult(true, "User unblocked") }
+                .onFailure { onResult(false, it.localizedMessage ?: "Could not unblock user") }
+        }
+    }
+
+    fun createServerGroup(name: String, description: String, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            runCatching { clientManager.getService().createGroup(NetworkCreateGroupRequest(name.trim(), description.trim())) }
+                .onSuccess { refreshConnectedAccountData(); onResult(true, "Group created") }
+                .onFailure { onResult(false, it.localizedMessage ?: "Could not create group") }
+        }
+    }
+
+    fun createMinecraftAccessSession(title: String, address: String, port: Int, accessMode: String, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            runCatching { clientManager.getService().createMinecraftSession(NetworkMinecraftSessionRequest(title.trim(), address.trim(), port, accessMode)) }
+                .onSuccess { refreshConnectedAccountData(); onResult(true, "Minecraft session created") }
+                .onFailure { onResult(false, it.localizedMessage ?: "Could not create Minecraft session") }
         }
     }
 }

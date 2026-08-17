@@ -180,6 +180,81 @@ interface NetAuthService {
     @POST("api/messages")
     suspend fun sendMessage(@Body request: SendMessageRequest): StatusResponse
 
+    @POST("api/qr/sessions")
+    suspend fun createQrSession(@Body request: NetworkQrCreateRequest): NetworkQrSessionResponse
+
+    @GET("api/qr/sessions/{requestId}")
+    suspend fun pollQrSession(@Path("requestId") requestId: String): NetworkQrSessionResponse
+
+    @POST("api/qr/sessions/{requestId}/approve")
+    suspend fun approveQrSession(@Path("requestId") requestId: String): StatusResponse
+
+    @GET("api/users/{id}/sessions")
+    suspend fun getActiveSessions(@Path("id") id: Int): List<NetworkDeviceSession>
+
+    @DELETE("api/users/{id}/sessions")
+    suspend fun revokeAllSessions(@Path("id") id: Int): StatusResponse
+
+    @POST("api/users/{id}/totp/setup")
+    suspend fun setupTotp(@Path("id") id: Int): NetworkTotpSetupResponse
+
+    @POST("api/users/{id}/totp/confirm")
+    suspend fun confirmTotp(@Path("id") id: Int, @Body request: NetworkVerificationCodeRequest): StatusResponse
+
+    @DELETE("api/users/{id}/totp")
+    suspend fun disableTotp(@Path("id") id: Int, @Body request: NetworkVerificationCodeRequest): StatusResponse
+
+    @GET("api/users/{id}/events")
+    suspend fun getSecurityEvents(@Path("id") id: Int): List<NetworkSecurityEvent>
+
+    @GET("api/users/{id}/notifications")
+    suspend fun getNotifications(@Path("id") id: Int): List<NetworkNotification>
+
+    @POST("api/users/{id}/notifications/read")
+    suspend fun markNotificationsRead(@Path("id") id: Int, @Body request: NetworkMarkReadRequest): StatusResponse
+
+    @POST("api/friends/request")
+    suspend fun requestFriend(@Body request: NetworkFriendRequest): NetworkFriendRelation
+
+    @GET("api/friends/{id}")
+    suspend fun getFriends(@Path("id") id: Int): List<NetworkFriendRelation>
+
+    @PUT("api/friends/{requesterId}/accept")
+    suspend fun acceptFriend(@Path("requesterId") requesterId: String): NetworkFriendRelation
+
+    @DELETE("api/friends/{otherId}")
+    suspend fun removeFriend(@Path("otherId") otherId: String): StatusResponse
+
+    @POST("api/blocks")
+    suspend fun blockUser(@Body request: NetworkBlockRequest): StatusResponse
+
+    @GET("api/blocks/{id}")
+    suspend fun getBlocks(@Path("id") id: Int): List<NetworkBlockRelation>
+
+    @DELETE("api/blocks/{id}/{targetId}")
+    suspend fun unblockUser(@Path("id") id: Int, @Path("targetId") targetId: String): StatusResponse
+
+    @GET("api/groups")
+    suspend fun getGroups(): List<NetworkGroup>
+
+    @POST("api/groups")
+    suspend fun createGroup(@Body request: NetworkCreateGroupRequest): NetworkGroup
+
+    @GET("api/groups/{groupId}/messages")
+    suspend fun getGroupMessages(@Path("groupId") groupId: String): List<NetworkGroupMessage>
+
+    @POST("api/groups/{groupId}/messages")
+    suspend fun sendGroupMessage(@Path("groupId") groupId: String, @Body request: NetworkGroupMessageRequest): NetworkGroupMessage
+
+    @GET("api/minecraft/sessions")
+    suspend fun getMinecraftSessions(): List<NetworkMinecraftSession>
+
+    @POST("api/minecraft/sessions")
+    suspend fun createMinecraftSession(@Body request: NetworkMinecraftSessionRequest): NetworkMinecraftSession
+
+    @POST("api/minecraft/sessions/{sessionId}/join-check")
+    suspend fun checkMinecraftAccess(@Path("sessionId") sessionId: String): NetworkMinecraftAccessCheck
+
     @POST("api/database/clear")
     suspend fun clearDatabase(): StatusResponse
 }
@@ -217,6 +292,100 @@ data class NetworkUploadFileRequest(
     val content: String = "",
     val contentBase64: String = ""
 )
+
+data class NetworkQrCreateRequest(
+    val deviceName: String = "OrvexaAuth Android",
+    val deviceType: String = "android",
+    val appName: String = "OrvexaAuth"
+)
+
+data class NetworkQrSessionResponse(
+    val requestId: String,
+    val status: String,
+    val expiresAt: Long,
+    val approveUrl: String? = null,
+    val sessionToken: String? = null,
+    val user: NetworkUserResponse? = null
+)
+
+data class NetworkDeviceSession(
+    val tokenHint: String,
+    val createdAt: Long,
+    val expiresAt: Long,
+    val deviceName: String = "",
+    val deviceType: String = "unknown",
+    val appName: String = ""
+)
+
+data class NetworkTotpSetupResponse(
+    val secret: String,
+    val expiresAt: Long,
+    val otpauthUri: String
+)
+
+data class NetworkVerificationCodeRequest(val code: String)
+data class NetworkMarkReadRequest(val ids: List<String>? = null)
+
+data class NetworkSecurityEvent(
+    val id: String,
+    val type: String,
+    val createdAt: Long,
+    val details: Map<String, Any?> = emptyMap()
+)
+
+data class NetworkNotification(
+    val id: String,
+    val type: String,
+    val title: String,
+    val body: String = "",
+    val createdAt: Long,
+    val read: Boolean = false
+)
+
+data class NetworkFriendRequest(val targetUserId: String? = null, val targetEmail: String? = null)
+data class NetworkFriendRelation(
+    val requesterId: String,
+    val targetId: String,
+    val status: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val direction: String? = null,
+    val user: NetworkUserResponse? = null
+)
+
+data class NetworkBlockRequest(val targetUserId: String? = null, val targetEmail: String? = null)
+data class NetworkBlockRelation(val userId: String, val targetId: String, val createdAt: Long, val user: NetworkUserResponse? = null)
+
+data class NetworkCreateGroupRequest(val name: String, val description: String = "")
+data class NetworkGroup(
+    val id: String,
+    val name: String,
+    val description: String = "",
+    val ownerId: String,
+    val memberIds: List<String> = emptyList(),
+    val createdAt: Long
+)
+data class NetworkGroupMessage(val id: Int, val senderId: String, val text: String, val timestamp: Long)
+data class NetworkGroupMessageRequest(val text: String)
+
+data class NetworkMinecraftSessionRequest(
+    val title: String,
+    val address: String = "",
+    val port: Int = 25565,
+    val accessMode: String = "invite"
+)
+data class NetworkMinecraftSession(
+    val id: String,
+    val ownerId: String,
+    val title: String,
+    val address: String = "",
+    val port: Int = 25565,
+    val accessMode: String = "invite",
+    val allowedUserIds: List<String> = emptyList(),
+    val createdAt: Long,
+    val updatedAt: Long
+)
+data class NetworkMinecraftAccessCheck(val allowed: Boolean, val sessionId: String, val accessMode: String)
 
 // Client configuration & dynamic Retrofit manager
 class NetAuthClientManager(private val context: Context) {

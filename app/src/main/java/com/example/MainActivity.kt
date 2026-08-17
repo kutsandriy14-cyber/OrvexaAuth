@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
@@ -19,14 +21,30 @@ import com.example.ui.*
 import com.example.ui.theme.MyApplicationTheme
 
 class MainActivity : ComponentActivity() {
+    private val qrApprovalRequest = mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        qrApprovalRequest.value = readQrApprovalRequest(intent)
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
                 val navController = rememberNavController()
                 val accountViewModel: AccountViewModel = viewModel()
                 val isAppLocked by accountViewModel.isAppLocked.collectAsState()
+                val requestId = qrApprovalRequest.value
+
+                LaunchedEffect(requestId) {
+                    if (!requestId.isNullOrBlank() && accountViewModel.loggedInUser.value != null) {
+                        accountViewModel.approveQrLogin(requestId) { approved, _ ->
+                            if (approved) {
+                                navController.navigate(Screen.Dashboard.route) {
+                                    popUpTo(0) { inclusive = true }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 Box(modifier = Modifier.fillMaxSize()) {
                     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -106,5 +124,19 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        qrApprovalRequest.value = readQrApprovalRequest(intent)
+    }
+
+    private fun readQrApprovalRequest(intent: android.content.Intent?): String? {
+        val uri = intent?.data ?: return null
+        if (uri.scheme != "orvexaauth" || uri.host != "qr" || !uri.path.orEmpty().startsWith("/approve")) {
+            return null
+        }
+        return uri.getQueryParameter("request")?.takeIf { it.isNotBlank() }
     }
 }

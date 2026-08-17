@@ -1119,6 +1119,12 @@ fun DashboardScreen(
         }
     }
 
+    LaunchedEffect(user?.id) {
+        if (user != null) {
+            viewModel.refreshConnectedAccountData()
+        }
+    }
+
     // Guard if user is null
     if (user == null) {
         Box(modifier = Modifier.fillMaxSize())
@@ -1215,6 +1221,13 @@ fun DashboardScreen(
                     label = { Text(viewModel.t("tab_messages")) },
                     modifier = Modifier.testTag("tab_messages")
                 )
+                NavigationBarItem(
+                    selected = activeTab == 4,
+                    onClick = { activeTab = 4 },
+                    icon = { Icon(Icons.Rounded.Group, contentDescription = "Social") },
+                    label = { Text("Social") },
+                    modifier = Modifier.testTag("tab_social")
+                )
             }
         }
     ) { paddingValues ->
@@ -1229,6 +1242,7 @@ fun DashboardScreen(
                 1 -> DashboardPersonalInfoTab(user = user!!, viewModel = viewModel)
                 2 -> DashboardSecurityTab(user = user!!, viewModel = viewModel, onSignOut = onSignOut)
                 3 -> DashboardMessagesTab(viewModel = viewModel)
+                4 -> DashboardSocialTab(viewModel = viewModel)
             }
         }
     }
@@ -1675,6 +1689,13 @@ fun DashboardSecurityTab(
     var setupPasscodeInput by remember { mutableStateOf("") }
     var setupPasscodeConfirm by remember { mutableStateOf("") }
     var setupPasscodeError by remember { mutableStateOf<String?>(null) }
+    val activeSessions by viewModel.activeSessions.collectAsStateWithLifecycle()
+    val securityEvents by viewModel.securityEvents.collectAsStateWithLifecycle()
+    val notifications by viewModel.notifications.collectAsStateWithLifecycle()
+    var qrRequestId by remember { mutableStateOf("") }
+    var showTotpDialog by remember { mutableStateOf(false) }
+    var totpSecret by remember { mutableStateOf<String?>(null) }
+    var totpCode by remember { mutableStateOf("") }
 
     Column(
         modifier = Modifier
@@ -1801,6 +1822,69 @@ fun DashboardSecurityTab(
 
         GoogleCard {
             Column(modifier = Modifier.padding(16.dp)) {
+                Text("Server security", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                Text("Protect every OrvexaAuth session, not only this phone.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Two-factor authentication", fontWeight = FontWeight.SemiBold)
+                        Text("Set up a TOTP authenticator before approving sensitive actions.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    TextButton(onClick = {
+                        viewModel.beginTotpSetup { response, error ->
+                            if (response != null) { totpSecret = response.secret; showTotpDialog = true } else actionError = error
+                        }
+                    }) { Text("Set up") }
+                }
+                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                Text("Active devices: ${activeSessions.size}", fontWeight = FontWeight.SemiBold)
+                activeSessions.take(3).forEach { session ->
+                    Text("${session.deviceName.ifBlank { session.deviceType }} · ${session.tokenHint}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+                }
+                TextButton(onClick = {
+                    viewModel.revokeAllServerSessions { success, message ->
+                        actionSuccess = message
+                        if (success) onSignOut()
+                    }
+                }) { Text("Close every server session") }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        GoogleCard {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Approve desktop login", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                Text("Open an orvexaauth://qr/ link from a scanned code or paste its request ID here.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+                OutlinedTextField(value = qrRequestId, onValueChange = { qrRequestId = it }, label = { Text("QR request ID") }, singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 12.dp))
+                Button(onClick = {
+                    viewModel.approveQrLogin(qrRequestId.trim()) { success, message ->
+                        if (success) { qrRequestId = ""; actionSuccess = message } else actionError = message
+                    }
+                }, enabled = qrRequestId.isNotBlank(), modifier = Modifier.padding(top = 8.dp)) { Text("Approve login") }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        GoogleCard {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Security activity", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                if (securityEvents.isEmpty()) Text("No server security events yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
+                securityEvents.take(4).forEach { event -> Text("${event.type.replace('_', ' ')} · ${formatDate(event.createdAt)}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp)) }
+                if (notifications.isNotEmpty()) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
+                    Text("Notifications", fontWeight = FontWeight.SemiBold)
+                    notifications.take(3).forEach { note -> Text(note.title, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 5.dp)) }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        GoogleCard {
+            Column(modifier = Modifier.padding(16.dp)) {
                 Text(
                     text = "Danger zone",
                     style = MaterialTheme.typography.titleMedium,
@@ -1826,6 +1910,22 @@ fun DashboardSecurityTab(
                     Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.error)
                 }
             }
+        }
+
+        if (showTotpDialog) {
+            AlertDialog(
+                onDismissRequest = { showTotpDialog = false },
+                title = { Text("Set up two-factor authentication") },
+                text = {
+                    Column {
+                        Text("Add this secret to an authenticator app, then enter the current six-digit code.")
+                        Text(totpSecret.orEmpty(), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 12.dp))
+                        OutlinedTextField(value = totpCode, onValueChange = { totpCode = it.filter(Char::isDigit).take(6) }, label = { Text("Authenticator code") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
+                    }
+                },
+                confirmButton = { Button(onClick = { viewModel.confirmTotp(totpCode) { success, message -> if (success) { showTotpDialog = false; actionSuccess = message } else actionError = message } }, enabled = totpCode.length == 6) { Text("Enable") } },
+                dismissButton = { TextButton(onClick = { showTotpDialog = false }) { Text("Cancel") } }
+            )
         }
 
         // Change Password Dialog

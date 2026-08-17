@@ -50,6 +50,9 @@ function sanitizeUser(user) {
   if (!user) return null;
   const safe = { ...user };
   delete safe.passwordHash;
+  delete safe.totpSecret;
+  delete safe.totpPendingSecret;
+  delete safe.totpPendingExpiresAt;
   return safe;
 }
 
@@ -129,6 +132,114 @@ async function groupForMember(kv, dbName, groupId, userId) {
   return Array.isArray(group.memberIds) && group.memberIds.map(String).includes(String(userId)) ? group : null;
 }
 
+function base32Encode(bytes) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = 0;
+  let value = 0;
+  let output = "";
+  for (const byte of bytes) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      output += alphabet[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) output += alphabet[(value << (5 - bits)) & 31];
+  return output;
+}
+
+function base32Decode(input) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = 0;
+  let value = 0;
+  const output = [];
+  for (const char of String(input || "").toUpperCase().replace(/[^A-Z2-7]/g, "")) {
+    const index = alphabet.indexOf(char);
+    if (index < 0) continue;
+    value = (value << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      output.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return new Uint8Array(output);
+}
+
+async function totpCode(secret, counter) {
+  const key = await crypto.subtle.importKey("raw", base32Decode(secret), { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  const bytes = new Uint8Array(8);
+  let remaining = BigInt(counter);
+  for (let index = 7; index >= 0; index--) {
+    bytes[index] = Number(remaining & 255n);
+    remaining >>= 8n;
+  }
+  const signature = new Uint8Array(await crypto.subtle.sign("HMAC", key, bytes));
+  const offset = signature[signature.length - 1] & 15;
+  const value = ((signature[offset] & 127) << 24) | (signature[offset + 1] << 16) | (signature[offset + 2] << 8) | signature[offset + 3];
+  return String(value % 1000000).padStart(6, "0");
+}
+
+async function verifyTotp(secret, code) {
+  const normalizedCode = String(code || "").replace(/\s/g, "");
+  if (!/^\d{6}$/.test(normalizedCode) || !secret) return false;
+  const currentCounter = Math.floor(Date.now() / 30000);
+  for (let offset = -1; offset <= 1; offset++) {
+    if ((await totpCode(secret, currentCounter + offset)) === normalizedCode) return true;
+  }
+  return false;
+}
+
+function newTotpSecret() {
+  const bytes = new Uint8Array(20);
+  crypto.getRandomValues(bytes);
+  return base32Encode(bytes);
+}
+
+async function areFriends(kv, dbName, firstId, secondId) {
+  const raw = await kv.get(pairKey(dbName, firstId, secondId));
+  return Boolean(raw && JSON.parse(raw).status === "accepted");
+}
+
+async function writeUserEvent(kv, dbName, userId, type, request, detail = {}, env = {}, ctx) {
+  const key = `${dbName}:security_events:${userId}`;
+  const raw = await kv.get(key);
+  const events = raw ? JSON.parse(raw) : [];
+  const event = {
+    id: crypto.randomUUID(),
+    type: String(type).slice(0, 80),
+    createdAt: Date.now(),
+    appName: String(request?.headers?.get("X-App-Name") || "Unknown_App").slice(0, 120),
+    deviceName: String(request?.headers?.get("X-Device-Name") || "").slice(0, 120),
+    detail
+  };
+  events.push(event);
+  await kv.put(key, JSON.stringify(events.slice(-200)));
+  const noticesKey = `${dbName}:notifications:${userId}`;
+  const rawNotices = await kv.get(noticesKey);
+  const notices = rawNotices ? JSON.parse(rawNotices) : [];
+  notices.push({ ...event, read: false });
+  await kv.put(noticesKey, JSON.stringify(notices.slice(-200)));
+  const webhookUrl = env.DISCORD_WEBHOOK_URL || (typeof DISCORD_WEBHOOK_URL !== "undefined" ? DISCORD_WEBHOOK_URL : "");
+  if (webhookUrl) {
+    const task = fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: `OrvexaAuth: ${event.type} for user ${userId} at ${new Date(event.createdAt).toISOString()}` })
+    }).catch(() => undefined);
+    if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(task);
+    else await task;
+  }
+  return event;
+}
+
+async function sessionAllowsMinecraft(kv, dbName, minecraftSession, userId) {
+  if (String(minecraftSession.ownerId) === String(userId)) return true;
+  if (Array.isArray(minecraftSession.allowedUserIds) && minecraftSession.allowedUserIds.map(String).includes(String(userId))) return true;
+  return minecraftSession.accessMode === "friends" && areFriends(kv, dbName, minecraftSession.ownerId, userId);
+}
+
 async function handleFetch(request, env = {}, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -175,7 +286,9 @@ async function handleFetch(request, env = {}, ctx) {
       (path === "/api/register" && method === "POST") ||
       (path === "/api/login" && method === "POST") ||
       (path === "/api/sessions" && method === "POST") ||
-      (path.startsWith("/api/sessions/") && (method === "GET" || method === "DELETE"));
+      (path.startsWith("/api/sessions/") && (method === "GET" || method === "DELETE")) ||
+      (path === "/api/qr/sessions" && method === "POST") ||
+      (path.startsWith("/api/qr/sessions/") && method === "GET");
     const authSession = isPublicRoute ? null : await requireAuth(request, kv, dbName);
     if (!isPublicRoute && !authSession) {
       return errorResponse("Unauthorized: a valid Bearer session is required", 401);
@@ -234,8 +347,6 @@ async function handleFetch(request, env = {}, ctx) {
           birthDate: body.birthDate || "",
           gender: body.gender || "Rather not say",
           avatarColor: typeof body.avatarColor === "number" ? body.avatarColor : -12543232,
-          phoneNumber: body.phoneNumber || "",
-          recoveryEmail: body.recoveryEmail || "",
           keyProtect: body.keyProtect || "",
           createdAt: Date.now()
         };
@@ -248,6 +359,7 @@ async function handleFetch(request, env = {}, ctx) {
 
         // Log history activity
         await logAppEvent(kv, dbName, email, "register", request.headers.get("X-App-Name") || body.appName);
+        await writeUserEvent(kv, dbName, userId, "account_registered", request, {}, env, ctx);
 
         return jsonResponse({ ...sanitizeUser(profileData), sessionToken: session.token, expiresAt: session.expiresAt }, 201);
       }
@@ -278,11 +390,15 @@ async function handleFetch(request, env = {}, ctx) {
         if (profileData.passwordHash !== passwordHash) {
           return errorResponse("Invalid password", 401);
         }
+        if (profileData.totpSecret && !(await verifyTotp(profileData.totpSecret, body.totpCode))) {
+          return errorResponse("Two-factor authentication code is required or invalid", 428);
+        }
 
         const session = await createSession(kv, dbName, profileData, request, body);
 
         // Log history activity
         await logAppEvent(kv, dbName, email, "login", request.headers.get("X-App-Name") || body.appName);
+        await writeUserEvent(kv, dbName, userId, "session_created", request, { deviceType: session.deviceType }, env, ctx);
 
         return jsonResponse({ ...sanitizeUser(profileData), sessionToken: session.token, expiresAt: session.expiresAt }, 200);
       }
@@ -293,7 +409,11 @@ async function handleFetch(request, env = {}, ctx) {
         const email = (body.email || "").trim().toLowerCase();
         const user = await findUserByCredentials(kv, dbName, email, body.passwordHash);
         if (!user) return errorResponse("Invalid email or password", 401);
+        if (user.totpSecret && !(await verifyTotp(user.totpSecret, body.totpCode))) {
+          return errorResponse("Two-factor authentication code is required or invalid", 428);
+        }
         const session = await createSession(kv, dbName, user, request, body);
+        await writeUserEvent(kv, dbName, user.id, "session_created", request, { deviceType: session.deviceType }, env, ctx);
         return jsonResponse({ token: session.token, sessionToken: session.token, expiresAt: session.expiresAt, user: sanitizeUser(user) }, 201);
       }
 
@@ -307,6 +427,58 @@ async function handleFetch(request, env = {}, ctx) {
         }
         if (!session) return errorResponse("Session not found or expired", 401);
         return jsonResponse({ valid: true, ...session });
+      }
+
+      // 4b. QR LOGIN: a desktop client creates a short-lived request; an authenticated mobile session approves it.
+      if (path === "/api/qr/sessions" && method === "POST") {
+        const body = await request.json();
+        const requestId = crypto.randomUUID();
+        const createdAt = Date.now();
+        const expiresAt = createdAt + 5 * 60 * 1000;
+        const qrRequest = {
+          id: requestId,
+          status: "pending",
+          createdAt,
+          expiresAt,
+          deviceName: String(body.deviceName || "Desktop browser").slice(0, 120),
+          deviceType: String(body.deviceType || "desktop").slice(0, 40),
+          appName: String(body.appName || "OrvexaAuth Web").slice(0, 120)
+        };
+        await kv.put(`${dbName}:qr:${requestId}`, JSON.stringify(qrRequest), { expirationTtl: 5 * 60 });
+        return jsonResponse({ requestId, status: qrRequest.status, expiresAt, approveUrl: `orvexaauth://qr/${requestId}` }, 201);
+      }
+
+      if (/^\/api\/qr\/sessions\/[^/]+$/.test(path) && method === "GET") {
+        const requestId = path.split("/")[4];
+        const raw = await kv.get(`${dbName}:qr:${requestId}`);
+        if (!raw) return errorResponse("QR request not found or expired", 404);
+        const qrRequest = JSON.parse(raw);
+        if (qrRequest.expiresAt <= Date.now()) return errorResponse("QR request expired", 410);
+        const response = { requestId: qrRequest.id, status: qrRequest.status, expiresAt: qrRequest.expiresAt };
+        if (qrRequest.status === "approved") {
+          response.sessionToken = qrRequest.sessionToken;
+          response.user = sanitizeUser(await readUser(kv, dbName, qrRequest.userId));
+        }
+        return jsonResponse(response);
+      }
+
+      if (/^\/api\/qr\/sessions\/[^/]+\/approve$/.test(path) && method === "POST") {
+        const requestId = path.split("/")[4];
+        const raw = await kv.get(`${dbName}:qr:${requestId}`);
+        if (!raw) return errorResponse("QR request not found or expired", 404);
+        const qrRequest = JSON.parse(raw);
+        if (qrRequest.expiresAt <= Date.now()) return errorResponse("QR request expired", 410);
+        if (qrRequest.status !== "pending") return errorResponse("QR request was already handled", 409);
+        const user = await readUser(kv, dbName, authSession.userId);
+        if (!user) return errorResponse("User account not found", 404);
+        const session = await createSession(kv, dbName, user, request, qrRequest);
+        qrRequest.status = "approved";
+        qrRequest.userId = String(user.id);
+        qrRequest.approvedAt = Date.now();
+        qrRequest.sessionToken = session.token;
+        await kv.put(`${dbName}:qr:${requestId}`, JSON.stringify(qrRequest), { expirationTtl: Math.max(1, Math.ceil((qrRequest.expiresAt - Date.now()) / 1000)) });
+        await writeUserEvent(kv, dbName, user.id, "qr_login_approved", request, { deviceName: qrRequest.deviceName }, env, ctx);
+        return jsonResponse({ status: "approved", expiresAt: session.expiresAt });
       }
 
       // 5. PROFILES, ACTIVE SESSIONS, DEVICES, FRIENDS, BLOCKS, AND GROUPS
@@ -451,6 +623,22 @@ async function handleFetch(request, env = {}, ctx) {
         return jsonResponse({ status: "success", message: "User unblocked" });
       }
 
+      if (path === "/api/groups" && method === "GET") {
+        const result = await kv.list({ prefix: `${dbName}:group:` });
+        const groups = [];
+        for (const item of result.keys) {
+          const raw = await kv.get(item.name);
+          if (!raw) continue;
+          try {
+            const group = JSON.parse(raw);
+            if (Array.isArray(group.memberIds) && group.memberIds.map(String).includes(String(authSession.userId))) {
+              groups.push(group);
+            }
+          } catch (_e) {}
+        }
+        return jsonResponse(groups.sort((left, right) => Number(right.createdAt || 0) - Number(left.createdAt || 0)));
+      }
+
       if (path === "/api/groups" && method === "POST") {
         const body = await request.json();
         const name = String(body.name || "").trim().slice(0, 120);
@@ -501,6 +689,170 @@ async function handleFetch(request, env = {}, ctx) {
         messages.push(message);
         await kv.put(key, JSON.stringify(messages.slice(-500)));
         return jsonResponse(message, 201);
+      }
+
+      // 5b. SECURITY CENTER, TOTP, NOTIFICATIONS, AND MINECRAFT ACCESS CONTROL
+      if (/^\/api\/users\/[^/]+\/totp\/setup$/.test(path) && method === "POST") {
+        const userId = path.split("/")[3];
+        if (String(authSession.userId) !== String(userId)) return errorResponse("Forbidden", 403);
+        const user = await readUser(kv, dbName, userId);
+        if (!user) return errorResponse("User not found", 404);
+        const secret = newTotpSecret();
+        user.totpPendingSecret = secret;
+        user.totpPendingExpiresAt = Date.now() + 10 * 60 * 1000;
+        await kv.put(`${dbName}:user:${userId}`, JSON.stringify(user));
+        const label = encodeURIComponent(`OrvexaAuth:${user.email}`);
+        return jsonResponse({ secret, expiresAt: user.totpPendingExpiresAt, otpauthUri: `otpauth://totp/${label}?secret=${secret}&issuer=OrvexaAuth&algorithm=SHA1&digits=6&period=30` }, 201);
+      }
+
+      if (/^\/api\/users\/[^/]+\/totp\/confirm$/.test(path) && method === "POST") {
+        const userId = path.split("/")[3];
+        if (String(authSession.userId) !== String(userId)) return errorResponse("Forbidden", 403);
+        const user = await readUser(kv, dbName, userId);
+        const body = await request.json();
+        if (!user || !user.totpPendingSecret || user.totpPendingExpiresAt <= Date.now()) return errorResponse("TOTP setup expired; create a new setup request", 410);
+        if (!(await verifyTotp(user.totpPendingSecret, body.code))) return errorResponse("Invalid authentication code", 400);
+        user.totpSecret = user.totpPendingSecret;
+        delete user.totpPendingSecret;
+        delete user.totpPendingExpiresAt;
+        await kv.put(`${dbName}:user:${userId}`, JSON.stringify(user));
+        await writeUserEvent(kv, dbName, userId, "totp_enabled", request, {}, env, ctx);
+        return jsonResponse({ status: "success", enabled: true });
+      }
+
+      if (/^\/api\/users\/[^/]+\/totp$/.test(path) && method === "DELETE") {
+        const userId = path.split("/")[3];
+        if (String(authSession.userId) !== String(userId)) return errorResponse("Forbidden", 403);
+        const user = await readUser(kv, dbName, userId);
+        const body = await request.json();
+        if (!user || !user.totpSecret) return errorResponse("Two-factor authentication is not enabled", 404);
+        if (!(await verifyTotp(user.totpSecret, body.code))) return errorResponse("Invalid authentication code", 400);
+        delete user.totpSecret;
+        await kv.put(`${dbName}:user:${userId}`, JSON.stringify(user));
+        await writeUserEvent(kv, dbName, userId, "totp_disabled", request, {}, env, ctx);
+        return jsonResponse({ status: "success", enabled: false });
+      }
+
+      if (/^\/api\/users\/[^/]+\/events$/.test(path) && method === "GET") {
+        const userId = path.split("/")[3];
+        if (String(authSession.userId) !== String(userId)) return errorResponse("Forbidden", 403);
+        const raw = await kv.get(`${dbName}:security_events:${userId}`);
+        return jsonResponse(raw ? JSON.parse(raw).slice(-100).reverse() : []);
+      }
+
+      if (/^\/api\/users\/[^/]+\/notifications$/.test(path) && method === "GET") {
+        const userId = path.split("/")[3];
+        if (String(authSession.userId) !== String(userId)) return errorResponse("Forbidden", 403);
+        const raw = await kv.get(`${dbName}:notifications:${userId}`);
+        return jsonResponse(raw ? JSON.parse(raw).slice(-100).reverse() : []);
+      }
+
+      if (/^\/api\/users\/[^/]+\/notifications\/read$/.test(path) && method === "POST") {
+        const userId = path.split("/")[3];
+        if (String(authSession.userId) !== String(userId)) return errorResponse("Forbidden", 403);
+        const raw = await kv.get(`${dbName}:notifications:${userId}`);
+        const notifications = raw ? JSON.parse(raw) : [];
+        const body = await request.json();
+        const ids = Array.isArray(body.ids) ? new Set(body.ids.map(String)) : null;
+        for (const notification of notifications) {
+          if (!ids || ids.has(String(notification.id))) notification.read = true;
+        }
+        await kv.put(`${dbName}:notifications:${userId}`, JSON.stringify(notifications.slice(-200)));
+        return jsonResponse({ status: "success" });
+      }
+
+      if (/^\/api\/users\/[^/]+\/push-subscriptions$/.test(path) && method === "POST") {
+        const userId = path.split("/")[3];
+        if (String(authSession.userId) !== String(userId)) return errorResponse("Forbidden", 403);
+        const body = await request.json();
+        if (!body.endpoint || !body.keys?.p256dh || !body.keys?.auth) return errorResponse("A valid Web Push subscription is required", 400);
+        const key = `${dbName}:push_subscriptions:${userId}`;
+        const raw = await kv.get(key);
+        const subscriptions = raw ? JSON.parse(raw) : [];
+        const deduplicated = subscriptions.filter(item => item.endpoint !== body.endpoint);
+        deduplicated.push({ endpoint: String(body.endpoint).slice(0, 2000), keys: { p256dh: String(body.keys.p256dh).slice(0, 600), auth: String(body.keys.auth).slice(0, 300) }, createdAt: Date.now() });
+        await kv.put(key, JSON.stringify(deduplicated.slice(-10)));
+        return jsonResponse({ status: "success", subscriptions: deduplicated.length });
+      }
+
+      if (path === "/api/minecraft/sessions" && method === "POST") {
+        const body = await request.json();
+        const title = String(body.title || "Minecraft session").trim().slice(0, 120);
+        if (!title) return errorResponse("Session title is required", 400);
+        const minecraftSession = {
+          id: crypto.randomUUID(),
+          ownerId: String(authSession.userId),
+          title,
+          address: String(body.address || "").trim().slice(0, 253),
+          port: Number.isInteger(body.port) ? body.port : 25565,
+          accessMode: ["private", "friends", "invite"].includes(body.accessMode) ? body.accessMode : "invite",
+          allowedUserIds: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        };
+        await kv.put(`${dbName}:minecraft_session:${minecraftSession.id}`, JSON.stringify(minecraftSession));
+        await writeUserEvent(kv, dbName, authSession.userId, "minecraft_session_created", request, { sessionId: minecraftSession.id }, env, ctx);
+        return jsonResponse(minecraftSession, 201);
+      }
+
+      if (path === "/api/minecraft/sessions" && method === "GET") {
+        const result = await kv.list({ prefix: `${dbName}:minecraft_session:` });
+        const sessions = [];
+        for (const key of result.keys) {
+          const raw = await kv.get(key.name);
+          if (!raw) continue;
+          const minecraftSession = JSON.parse(raw);
+          if (await sessionAllowsMinecraft(kv, dbName, minecraftSession, authSession.userId)) sessions.push(minecraftSession);
+        }
+        return jsonResponse(sessions);
+      }
+
+      if (/^\/api\/minecraft\/sessions\/[^/]+$/.test(path) && method === "GET") {
+        const sessionId = path.split("/")[4];
+        const raw = await kv.get(`${dbName}:minecraft_session:${sessionId}`);
+        if (!raw) return errorResponse("Minecraft session not found", 404);
+        const minecraftSession = JSON.parse(raw);
+        if (!(await sessionAllowsMinecraft(kv, dbName, minecraftSession, authSession.userId))) return errorResponse("You do not have access to this Minecraft session", 403);
+        return jsonResponse(minecraftSession);
+      }
+
+      if (/^\/api\/minecraft\/sessions\/[^/]+\/invites$/.test(path) && method === "POST") {
+        const sessionId = path.split("/")[4];
+        const raw = await kv.get(`${dbName}:minecraft_session:${sessionId}`);
+        if (!raw) return errorResponse("Minecraft session not found", 404);
+        const minecraftSession = JSON.parse(raw);
+        if (String(minecraftSession.ownerId) !== String(authSession.userId)) return errorResponse("Only the session owner can manage invites", 403);
+        const targetId = await resolveUserId(kv, dbName, (await request.json()).targetUserId);
+        if (!targetId) return errorResponse("Target user not found", 404);
+        if (String(targetId) !== String(authSession.userId) && !(await areFriends(kv, dbName, authSession.userId, targetId))) return errorResponse("Only accepted friends can be invited", 403);
+        if (!minecraftSession.allowedUserIds.map(String).includes(String(targetId))) minecraftSession.allowedUserIds.push(String(targetId));
+        minecraftSession.updatedAt = Date.now();
+        await kv.put(`${dbName}:minecraft_session:${sessionId}`, JSON.stringify(minecraftSession));
+        await writeUserEvent(kv, dbName, targetId, "minecraft_invite_received", request, { sessionId, title: minecraftSession.title }, env, ctx);
+        return jsonResponse(minecraftSession);
+      }
+
+      if (/^\/api\/minecraft\/sessions\/[^/]+\/invites\/[^/]+$/.test(path) && method === "DELETE") {
+        const parts = path.split("/");
+        const sessionId = parts[4];
+        const targetId = parts[6];
+        const raw = await kv.get(`${dbName}:minecraft_session:${sessionId}`);
+        if (!raw) return errorResponse("Minecraft session not found", 404);
+        const minecraftSession = JSON.parse(raw);
+        if (String(minecraftSession.ownerId) !== String(authSession.userId)) return errorResponse("Only the session owner can manage invites", 403);
+        minecraftSession.allowedUserIds = minecraftSession.allowedUserIds.filter(id => String(id) !== String(targetId));
+        minecraftSession.updatedAt = Date.now();
+        await kv.put(`${dbName}:minecraft_session:${sessionId}`, JSON.stringify(minecraftSession));
+        return jsonResponse(minecraftSession);
+      }
+
+      if (/^\/api\/minecraft\/sessions\/[^/]+\/join-check$/.test(path) && method === "POST") {
+        const sessionId = path.split("/")[4];
+        const raw = await kv.get(`${dbName}:minecraft_session:${sessionId}`);
+        if (!raw) return errorResponse("Minecraft session not found", 404);
+        const minecraftSession = JSON.parse(raw);
+        const allowed = await sessionAllowsMinecraft(kv, dbName, minecraftSession, authSession.userId);
+        return jsonResponse({ allowed, sessionId, accessMode: minecraftSession.accessMode });
       }
 
       // 6. UPDATE PROFILE
