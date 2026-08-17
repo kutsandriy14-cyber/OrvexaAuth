@@ -40,6 +40,12 @@ The client checks the OrvexaAuth GitHub Releases endpoint over HTTPS. When a new
 
 The Worker source is in `termux-server/cloudflare_worker.js`. Deploy it with Wrangler from a separately configured environment. The KV binding name is `ORVEXAAUTH_KV`. Credentials and deployment tokens must be supplied through Cloudflare or CI secrets and must never be placed in source code.
 
+### Authentication and social API
+
+After a successful login or registration, the Worker returns a short-lived profile response together with a server-issued `sessionToken`. The Android client stores only that token in Android Keystore and automatically sends it as `Authorization: Bearer <token>`. Password hashes are used only during credential exchange and are not persisted as session material. Sessions expire after 30 days, can be validated with `GET /api/sessions/{token}`, revoked with `DELETE /api/sessions/{token}`, listed for the current account through `GET /api/users/{id}/sessions`, or terminated for all devices with `DELETE /api/users/{id}/sessions`.
+
+Authenticated social routes currently include friend requests and acceptance (`/api/friends/request`, `/api/friends/{id}`, `/api/friends/{id}/accept`), block management (`/api/blocks`), profile presence (`GET /api/users/{id}`), group creation and membership (`/api/groups`), and group messages (`/api/groups/{id}/messages`). These endpoints are beta APIs and require the bearer token; no API key or service secret is embedded in the Android or C++ client.
+
 ## GitHub workflow
 
 `.github/workflows/android.yml` performs the following actions on `main`:

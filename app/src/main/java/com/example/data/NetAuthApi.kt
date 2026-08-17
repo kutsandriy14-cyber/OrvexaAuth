@@ -13,12 +13,23 @@ import java.util.concurrent.TimeUnit
 data class StatusResponse(
     val status: String,
     val message: String,
-    val serverTime: Long
+    val serverTime: Long? = null
 )
 
 data class NetworkLoginRequest(
     val email: String,
-    val passwordHash: String
+    val passwordHash: String,
+    val deviceName: String = "OrvexaAuth Android",
+    val deviceType: String = "android"
+)
+
+data class NetworkSessionResponse(
+    val valid: Boolean? = null,
+    val token: String? = null,
+    val sessionToken: String? = null,
+    val expiresAt: Long? = null,
+    val userId: Int? = null,
+    val email: String? = null
 )
 
 data class NetworkRegisterRequest(
@@ -67,7 +78,9 @@ data class NetworkUserResponse(
     @com.squareup.moshi.Json(name = "dataQuotaMb") val dataQuotaMbCamel: Int? = null,
     @com.squareup.moshi.Json(name = "data_quota_mb") val dataQuotaMbSnake: Int? = null,
     @com.squareup.moshi.Json(name = "createdAt") val createdAtCamel: Long? = null,
-    @com.squareup.moshi.Json(name = "created_at") val createdAtSnake: Long? = null
+    @com.squareup.moshi.Json(name = "created_at") val createdAtSnake: Long? = null,
+    val sessionToken: String? = null,
+    val expiresAt: Long? = null
 ) {
     fun toLocalUser(passwordHash: String): User {
         val fName = firstNameCamel ?: firstNameSnake ?: ""
@@ -109,6 +122,15 @@ interface NetAuthService {
 
     @POST("api/register")
     suspend fun register(@Body request: NetworkRegisterRequest): NetworkUserResponse
+
+    @POST("api/sessions")
+    suspend fun createSession(@Body request: NetworkLoginRequest): NetworkSessionResponse
+
+    @GET("api/sessions/{token}")
+    suspend fun validateSession(@Path("token") token: String): NetworkSessionResponse
+
+    @DELETE("api/sessions/{token}")
+    suspend fun revokeSession(@Path("token") token: String): StatusResponse
 
     @PUT("api/users/{id}")
     suspend fun updateProfile(
@@ -255,18 +277,21 @@ class NetAuthClientManager(private val context: Context) {
             prefs.edit().putStringSet("blocked_users", value).apply()
         }
 
-    fun saveSession(userEmail: String, passwordHash: String) {
+    fun saveSession(userEmail: String, sessionToken: String) {
         secureStore.putString("session_email", userEmail)
-        secureStore.putString("session_password_hash", passwordHash)
+        secureStore.putString("session_token", sessionToken)
+        // Remove the pre-beta legacy value if it was ever written by an older build.
+        secureStore.remove("session_password_hash")
     }
 
     fun clearSession() {
         secureStore.remove("session_email")
+        secureStore.remove("session_token")
         secureStore.remove("session_password_hash")
     }
 
     fun getSessionEmail(): String = secureStore.getString("session_email") ?: ""
-    fun getSessionPasswordHash(): String = secureStore.getString("session_password_hash") ?: ""
+    fun getSessionToken(): String = secureStore.getString("session_token") ?: ""
 
     fun saveLoggedInUser(user: User) {
         prefs.edit()
@@ -284,7 +309,8 @@ class NetAuthClientManager(private val context: Context) {
             .putInt("user_quota", user.dataQuotaMb)
             .putLong("user_created_at", user.createdAt)
             .apply()
-        secureStore.putString("user_password_hash", user.passwordHash)
+        // Password hashes are never persisted as session material.
+        secureStore.remove("user_password_hash")
     }
 
     fun getLoggedInUser(): User? {
@@ -292,7 +318,7 @@ class NetAuthClientManager(private val context: Context) {
         return User(
             id = prefs.getInt("user_id", 0),
             email = email,
-            passwordHash = secureStore.getString("user_password_hash") ?: "",
+            passwordHash = "",
             firstName = prefs.getString("user_first_name", "") ?: "",
             lastName = prefs.getString("user_last_name", "") ?: "",
             birthDate = prefs.getString("user_birth_date", "") ?: "",
@@ -339,10 +365,13 @@ class NetAuthClientManager(private val context: Context) {
 
         // Interceptor to inject headers dynamically
         val headerInterceptor = okhttp3.Interceptor { chain ->
-            val request = chain.request().newBuilder()
+            val requestBuilder = chain.request().newBuilder()
                 .addHeader("X-App-Name", "OrvexaAuthAndroid-Beta")
-                .build()
-            chain.proceed(request)
+            val sessionToken = getSessionToken()
+            if (sessionToken.isNotBlank()) {
+                requestBuilder.addHeader("Authorization", "Bearer $sessionToken")
+            }
+            chain.proceed(requestBuilder.build())
         }
         
         val okHttpClient = OkHttpClient.Builder()

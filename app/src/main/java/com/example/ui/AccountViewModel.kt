@@ -78,11 +78,30 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
             refreshServerUsers()
         }
 
-        // Restore logged in user session if present
+        // Restore only a server-issued bearer session; legacy password-hash sessions are discarded.
         val savedUser = clientManager.getLoggedInUser()
-        if (savedUser != null) {
-            _loggedInUser.value = savedUser
-            loadUserFiles()
+        val savedToken = clientManager.getSessionToken()
+        if (savedUser != null && savedToken.isNotBlank()) {
+            viewModelScope.launch {
+                try {
+                    val session = clientManager.getService().validateSession(savedToken)
+                    val validForUser = session.valid == true &&
+                        (session.userId == null || session.userId == savedUser.id)
+                    if (validForUser) {
+                        _loggedInUser.value = savedUser
+                        loadUserFiles()
+                    } else {
+                        clientManager.clearSession()
+                        clientManager.clearLoggedInUser()
+                    }
+                } catch (_: Exception) {
+                    clientManager.clearSession()
+                    clientManager.clearLoggedInUser()
+                }
+            }
+        } else if (savedUser != null) {
+            clientManager.clearSession()
+            clientManager.clearLoggedInUser()
         }
 
     }
@@ -361,6 +380,10 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 val response = clientManager.getService().login(
                     NetworkLoginRequest(email = email, passwordHash = passwordHash)
                 )
+                val sessionToken = response.sessionToken?.trim().orEmpty()
+                if (sessionToken.isBlank()) {
+                    throw IllegalStateException("Server did not return a session token")
+                }
                 val remoteUser = response.toLocalUser(passwordHash)
 
                 // OrvexaAuth Beta uses the public API as the only account backend.
@@ -370,8 +393,8 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 _requireKeyProtect.value = false
                 _loginKeyProtect.value = ""
 
-                // Save active session for auto-login
-                clientManager.saveSession(email, passwordHash)
+                // Save only the server-issued bearer token for session restoration.
+                clientManager.saveSession(email, sessionToken)
                 clientManager.saveLoggedInUser(remoteUser)
 
                 refreshServerUsers()
@@ -407,6 +430,12 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun logout() {
+        val token = clientManager.getSessionToken()
+        if (token.isNotBlank()) {
+            viewModelScope.launch {
+                try { clientManager.getService().revokeSession(token) } catch (_: Exception) { }
+            }
+        }
         clientManager.clearSession()
         clientManager.clearLoggedInUser()
         _loggedInUser.value = null
@@ -575,6 +604,10 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                         keyProtect = ""
                     )
                 )
+                val sessionToken = response.sessionToken?.trim().orEmpty()
+                if (sessionToken.isBlank()) {
+                    throw IllegalStateException("Server did not return a session token")
+                }
                 val localUser = response.toLocalUser(passwordHash)
 
                 // Keep only the local session record; all account data remains server-authoritative.
@@ -583,7 +616,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 _regError.value = null
                 resetRegDraft()
 
-                clientManager.saveSession(email, passwordHash)
+                clientManager.saveSession(email, sessionToken)
                 clientManager.saveLoggedInUser(localUser)
 
                 refreshServerUsers()
@@ -689,6 +722,8 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 // The public beta keeps the current session intact when remote deletion fails.
                 return@launch
             }
+            clientManager.clearSession()
+            clientManager.clearLoggedInUser()
             _loggedInUser.value = null
             onSuccess()
         }
