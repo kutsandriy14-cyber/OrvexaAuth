@@ -3,6 +3,7 @@ package com.example.data
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import android.widget.Toast
 import androidx.core.content.FileProvider
@@ -26,8 +27,9 @@ import java.util.concurrent.TimeUnit
  */
 object UpdateManager {
     private const val RELEASES_URL =
-        "https://api.github.com/repos/kutsandriy14-cyber/OrvexaAuth/releases?per_page=10"
-    private const val APK_ASSET = "app-debug.apk"
+        "https://api.github.com/repos/kutsandriy14-cyber/OrvexaAuth/releases?per_page=30"
+    private const val RELEASE_DOWNLOAD_PREFIX =
+        "/kutsandriy14-cyber/OrvexaAuth/releases/download/"
     private const val APK_MIME = "application/vnd.android.package-archive"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -35,8 +37,22 @@ object UpdateManager {
         val tag: String,
         val displayName: String,
         val apkUrl: String,
-        val checksumUrl: String?
+        val sha256: String
     )
+
+    private data class SemanticVersion(
+        val major: Int,
+        val minor: Int,
+        val patch: Int
+    ) : Comparable<SemanticVersion> {
+        override fun compareTo(other: SemanticVersion): Int = compareValuesBy(
+            this,
+            other,
+            SemanticVersion::major,
+            SemanticVersion::minor,
+            SemanticVersion::patch
+        )
+    }
 
     private val client = OkHttpClient.Builder()
         .connectionSpecs(listOf(okhttp3.ConnectionSpec.MODERN_TLS))
@@ -54,30 +70,41 @@ object UpdateManager {
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext null
                 val releases = JSONArray(response.body?.string().orEmpty())
+                val currentVersion = parseVersion(BuildConfig.VERSION_NAME) ?: return@withContext null
+                var newest: ReleaseUpdate? = null
+                var newestVersion: SemanticVersion? = null
                 for (index in 0 until releases.length()) {
                     val release = releases.optJSONObject(index) ?: continue
-                    val tag = release.optString("tag_name")
-                    val current = currentTag()
-                    if (tag.isBlank() || tag == current || tag.startsWith("$current-")) continue
+                    if (release.optBoolean("draft")) continue
+                    val tag = release.optString("tag_name").trim()
+                    val releaseVersion = parseVersion(tag) ?: continue
+                    if (releaseVersion <= currentVersion) continue
+                    val releaseVersionName = tag.removePrefix("v").substringBefore("-")
                     val assets = release.optJSONArray("assets") ?: continue
-                    var apkUrl: String? = null
-                    var checksumUrl: String? = null
+                    val allowedNames = setOf(
+                        "OrvexaAuth-$releaseVersionName.apk",
+                        "OrvexaAuth-Beta-$releaseVersionName.apk"
+                    )
                     for (assetIndex in 0 until assets.length()) {
                         val asset = assets.optJSONObject(assetIndex) ?: continue
-                        when (asset.optString("name")) {
-                            APK_ASSET -> apkUrl = asset.optString("browser_download_url")
-                            "app-debug.apk.sha256" -> checksumUrl = asset.optString("browser_download_url")
-                        }
-                    }
-                    if (!apkUrl.isNullOrBlank()) {
-                        return@withContext ReleaseUpdate(
+                        if (asset.optString("name") !in allowedNames) continue
+                        val apkUrl = asset.optString("browser_download_url")
+                        val sha256 = asset.optString("digest")
+                            .removePrefix("sha256:")
+                            .lowercase()
+                        if (!isTrustedReleaseUrl(apkUrl) || !SHA256_REGEX.matches(sha256)) continue
+                        if (newestVersion == null || releaseVersion > newestVersion!!) {
+                            newest = ReleaseUpdate(
                             tag = tag,
                             displayName = release.optString("name", tag),
                             apkUrl = apkUrl,
-                            checksumUrl = checksumUrl
+                            sha256 = sha256
                         )
+                            newestVersion = releaseVersion
+                        }
                     }
                 }
+                return@withContext newest
             }
         } catch (_: Exception) {
             // Update checks are optional and must never block authentication.
@@ -92,18 +119,30 @@ object UpdateManager {
         val appContext = context.applicationContext
         scope.launch {
             try {
-                val apkFile = File(appContext.cacheDir, APK_ASSET)
-                downloadToFile(update.apkUrl, apkFile)
-                update.checksumUrl?.let { checksumUrl ->
-                    val expected = downloadText(checksumUrl)
-                        .trim()
-                        .substringBefore(" ")
-                        .substringBefore("\t")
-                        .lowercase()
-                    if (expected.isNotBlank() && expected != sha256(apkFile)) {
-                        apkFile.delete()
-                        error("APK checksum verification failed")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                    !appContext.packageManager.canRequestPackageInstalls()
+                ) {
+                    withContext(Dispatchers.Main) {
+                        appContext.startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:${appContext.packageName}")
+                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                        Toast.makeText(
+                            appContext,
+                            "Разреши установку обновлений для OrvexaAuth, затем нажми обновление ещё раз",
+                            Toast.LENGTH_LONG
+                        ).show()
                     }
+                    return@launch
+                }
+
+                val apkFile = File(appContext.cacheDir, "OrvexaAuth-${update.tag.removePrefix("v")}.apk")
+                downloadToFile(update.apkUrl, apkFile)
+                if (update.sha256 != sha256(apkFile)) {
+                    apkFile.delete()
+                    error("APK checksum verification failed")
                 }
 
                 withContext(Dispatchers.Main) {
@@ -145,6 +184,7 @@ object UpdateManager {
     }
 
     private fun downloadToFile(url: String, destination: File) {
+        check(isTrustedReleaseUrl(url)) { "Untrusted APK URL" }
         val request = Request.Builder().url(url).build()
         client.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "Download failed: ${response.code}" }
@@ -155,12 +195,20 @@ object UpdateManager {
         }
     }
 
-    private fun downloadText(url: String): String {
-        val request = Request.Builder().url(url).build()
-        client.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "Checksum download failed: ${response.code}" }
-            return response.body?.string().orEmpty()
-        }
+    private fun parseVersion(value: String): SemanticVersion? {
+        val match = VERSION_PATTERN.matchEntire(value.trim()) ?: return null
+        return SemanticVersion(
+            major = match.groupValues[1].toIntOrNull() ?: return null,
+            minor = match.groupValues[2].toIntOrNull() ?: return null,
+            patch = match.groupValues[3].toIntOrNull() ?: return null
+        )
+    }
+
+    private fun isTrustedReleaseUrl(url: String): Boolean {
+        val uri = Uri.parse(url)
+        return uri.scheme == "https" &&
+            uri.host == "github.com" &&
+            uri.path?.startsWith(RELEASE_DOWNLOAD_PREFIX) == true
     }
 
     private fun sha256(file: File): String {
@@ -174,4 +222,7 @@ object UpdateManager {
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
+
+    private val VERSION_PATTERN = Regex("^v?(\\d+)\\.(\\d+)\\.(\\d+)(?:[-+].*)?$")
+    private val SHA256_REGEX = Regex("^[a-f0-9]{64}$")
 }
