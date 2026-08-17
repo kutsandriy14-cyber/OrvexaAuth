@@ -1,11 +1,7 @@
 package com.example.data
 
-import androidx.room.Entity
-import androidx.room.PrimaryKey
-
-@Entity(tableName = "users")
 data class User(
-    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val id: Int = 0,
     val email: String,
     val passwordHash: String,
     val firstName: String,
@@ -22,9 +18,8 @@ data class User(
     val createdAt: Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "banned_hardware")
 data class BannedHardware(
-    @PrimaryKey val hardwareValue: String,
+    val hardwareValue: String,
     val banType: String = "IP", // "IP" or "MAC"
     val bannedAt: Long = System.currentTimeMillis()
 )

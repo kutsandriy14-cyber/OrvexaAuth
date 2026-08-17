@@ -1,6 +1,7 @@
 package com.example.data
 
 import android.content.Context
+import com.example.BuildConfig
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -28,8 +29,6 @@ data class NetworkRegisterRequest(
     val birthDate: String,
     val gender: String,
     val avatarColor: Int,
-    val phoneNumber: String,
-    val recoveryEmail: String,
     val ipAddress: String = "",
     val macAddress: String = "",
     val keyProtect: String = "",
@@ -41,8 +40,6 @@ data class NetworkUpdateProfileRequest(
     val lastName: String,
     val birthDate: String,
     val gender: String,
-    val phoneNumber: String,
-    val recoveryEmail: String
 )
 
 data class NetworkUpdatePasswordRequest(
@@ -210,78 +207,25 @@ data class NetworkUploadFileRequest(
 // Client configuration & dynamic Retrofit manager
 class NetAuthClientManager(private val context: Context) {
     private val prefs = context.getSharedPreferences("net_auth_prefs", Context.MODE_PRIVATE)
+    private val secureStore = SecureStore(context)
 
-    companion object {
-        private const val KEY_SERVER_URL = "server_url"
-        private const val KEY_EMAIL_SUFFIX = "email_suffix"
-        private const val KEY_CONNECTION_MODE = "connection_mode" // "local" or "remote"
-        private const val KEY_ACTIVE_DATABASE = "active_database"
-        
-        const val DEFAULT_EMAIL_SUFFIX = "@netauth.lan"
-        const val DEFAULT_SERVER_URL = "http://192.168.1.100:8080/"
+    init {
+        // Beta 0.1.1 never persists custom endpoints or server lists.
+        prefs.edit()
+            .remove("server_url")
+            .remove("saved_servers")
+            .remove("email_suffix")
+            .remove("active_database")
+            .apply()
     }
 
-    var activeDatabase: String
-        get() = prefs.getString(KEY_ACTIVE_DATABASE, "default") ?: "default"
-        set(value) {
-            val sanitized = value.trim().ifEmpty { "default" }.replace(Regex("[^a-zA-Z0-9_-]"), "")
-            prefs.edit().putString(KEY_ACTIVE_DATABASE, sanitized).apply()
-            rebuildService()
-        }
+    companion object {
+        const val DEFAULT_SERVER_URL = "https://orvexaauth-api.bot724524.workers.dev/"
+    }
 
-    var serverUrl: String
-        get() {
-            var url = prefs.getString(KEY_SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
-            if (!url.endsWith("/")) {
-                url += "/"
-            }
-            return url
-        }
-        set(value) {
-            val sanitized = if (value.endsWith("/")) value else "$value/"
-            prefs.edit().putString(KEY_SERVER_URL, sanitized).apply()
-            
-            val currentServers = prefs.getStringSet("saved_servers", setOf(DEFAULT_SERVER_URL)) ?: setOf(DEFAULT_SERVER_URL)
-            val updated = currentServers.toMutableSet()
-            updated.add(sanitized)
-            prefs.edit().putStringSet("saved_servers", updated).apply()
-            
-            rebuildService()
-        }
-
-    var savedServers: Set<String>
-        get() {
-            val servers = prefs.getStringSet("saved_servers", null)
-            if (servers == null) {
-                val initial = setOf(DEFAULT_SERVER_URL, serverUrl)
-                prefs.edit().putStringSet("saved_servers", initial).apply()
-                return initial
-            }
-            return servers
-        }
-        set(value) {
-            prefs.edit().putStringSet("saved_servers", value).apply()
-        }
-
-    var emailSuffix: String
-        get() = prefs.getString(KEY_EMAIL_SUFFIX, DEFAULT_EMAIL_SUFFIX) ?: DEFAULT_EMAIL_SUFFIX
-        set(value) {
-            val sanitized = if (value.startsWith("@")) value else "@$value"
-            prefs.edit().putString(KEY_EMAIL_SUFFIX, sanitized).apply()
-        }
-
-    var connectionMode: String
-        get() = prefs.getString(KEY_CONNECTION_MODE, "remote") ?: "remote"
-        set(value) {
-            prefs.edit().putString(KEY_CONNECTION_MODE, value).apply()
-        }
-
-    var serviceKey: String
-        get() = prefs.getString("service_key", "my_secure_secret_key") ?: "my_secure_secret_key"
-        set(value) {
-            prefs.edit().putString("service_key", value).apply()
-            rebuildService()
-        }
+    /** The beta client has one public Cloudflare endpoint and does not save server settings. */
+    val serverUrl: String
+        get() = DEFAULT_SERVER_URL
 
     var language: String
         get() = prefs.getString("app_lang", "en") ?: "en"
@@ -290,9 +234,9 @@ class NetAuthClientManager(private val context: Context) {
         }
 
     var appPasscode: String
-        get() = prefs.getString("app_passcode", "") ?: ""
+        get() = secureStore.getString("app_passcode") ?: ""
         set(value) {
-            prefs.edit().putString("app_passcode", value).apply()
+            if (value.isBlank()) secureStore.remove("app_passcode") else secureStore.putString("app_passcode", value)
         }
 
     val deviceMac: String
@@ -322,27 +266,23 @@ class NetAuthClientManager(private val context: Context) {
         }
 
     fun saveSession(userEmail: String, passwordHash: String) {
-        prefs.edit()
-            .putString("session_email", userEmail)
-            .putString("session_password_hash", passwordHash)
-            .apply()
+        secureStore.putString("session_email", userEmail)
+        secureStore.putString("session_password_hash", passwordHash)
     }
 
     fun clearSession() {
-        prefs.edit()
-            .remove("session_email")
-            .remove("session_password_hash")
-            .apply()
+        secureStore.remove("session_email")
+        secureStore.remove("session_password_hash")
     }
 
-    fun getSessionEmail(): String = prefs.getString("session_email", "") ?: ""
-    fun getSessionPasswordHash(): String = prefs.getString("session_password_hash", "") ?: ""
+    fun getSessionEmail(): String = secureStore.getString("session_email") ?: ""
+    fun getSessionPasswordHash(): String = secureStore.getString("session_password_hash") ?: ""
 
     fun saveLoggedInUser(user: User) {
         prefs.edit()
             .putInt("user_id", user.id)
             .putString("user_email", user.email)
-            .putString("user_password_hash", user.passwordHash)
+            // The password hash is secret session material; it is stored below in Keystore.
             .putString("user_first_name", user.firstName)
             .putString("user_last_name", user.lastName)
             .putString("user_birth_date", user.birthDate)
@@ -356,6 +296,7 @@ class NetAuthClientManager(private val context: Context) {
             .putInt("user_quota", user.dataQuotaMb)
             .putLong("user_created_at", user.createdAt)
             .apply()
+        secureStore.putString("user_password_hash", user.passwordHash)
     }
 
     fun getLoggedInUser(): User? {
@@ -363,7 +304,7 @@ class NetAuthClientManager(private val context: Context) {
         return User(
             id = prefs.getInt("user_id", 0),
             email = email,
-            passwordHash = prefs.getString("user_password_hash", "") ?: "",
+            passwordHash = secureStore.getString("user_password_hash") ?: "",
             firstName = prefs.getString("user_first_name", "") ?: "",
             lastName = prefs.getString("user_last_name", "") ?: "",
             birthDate = prefs.getString("user_birth_date", "") ?: "",
@@ -380,10 +321,10 @@ class NetAuthClientManager(private val context: Context) {
     }
 
     fun clearLoggedInUser() {
+        secureStore.remove("user_password_hash")
         prefs.edit()
             .remove("user_id")
             .remove("user_email")
-            .remove("user_password_hash")
             .remove("user_first_name")
             .remove("user_last_name")
             .remove("user_birth_date")
@@ -408,21 +349,20 @@ class NetAuthClientManager(private val context: Context) {
 
     private fun rebuildService(): NetAuthService {
         val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BODY
+            // Never log request metadata for authentication traffic, even in debug builds.
+            level = HttpLoggingInterceptor.Level.NONE
         }
 
         // Interceptor to inject headers dynamically
         val headerInterceptor = okhttp3.Interceptor { chain ->
             val request = chain.request().newBuilder()
-                .addHeader("X-Database-Name", activeDatabase)
-                .addHeader("X-Service-Key", serviceKey)
-                .addHeader("X-App-Name", "NetAuthAndroidClient")
-                .addHeader("ngrok-skip-browser-warning", "1")
+                .addHeader("X-App-Name", "OrvexaAuthAndroid-Beta")
                 .build()
             chain.proceed(request)
         }
         
         val okHttpClient = OkHttpClient.Builder()
+            .connectionSpecs(listOf(okhttp3.ConnectionSpec.MODERN_TLS))
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)

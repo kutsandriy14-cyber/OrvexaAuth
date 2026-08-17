@@ -13,25 +13,24 @@ import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import java.util.Calendar
-import java.net.NetworkInterface
-import java.net.Inet4Address
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.cancelChildren
 import okhttp3.Request
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 import java.io.File
+import java.security.MessageDigest
 
 class AccountViewModel(application: Application) : AndroidViewModel(application) {
     private val clientManager = NetAuthClientManager(application)
-    private val db = AppDatabase.getDatabase(application)
-    val userDao = db.userDao()
-    val messageDao = db.messageDao()
+    val userDao = UserDao(application)
+    val messageDao = MessageDao(application)
     val allBannedHardware = userDao.getAllBannedHardware()
+
+    val googleAccountEmail: StateFlow<String?> = MutableStateFlow(null)
+    val googleAvatarUrl: StateFlow<String?> = MutableStateFlow(null)
+
+    // OrvexaAuth Beta is public-API-only; no local backend or third-party auth fallback.
 
     private val _blockedUsers = MutableStateFlow<Set<String>>(clientManager.blockedUsers)
     val blockedUsers: StateFlow<Set<String>> = _blockedUsers.asStateFlow()
@@ -52,42 +51,8 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         return _blockedUsers.value.contains(email.trim().lowercase())
     }
 
-    // Server connection states
-    private val _connectionMode = MutableStateFlow("remote") // Always remote
-    val connectionMode: StateFlow<String> = _connectionMode.asStateFlow()
-
-    private val _serverUrl = MutableStateFlow(clientManager.serverUrl)
-    val serverUrl: StateFlow<String> = _serverUrl.asStateFlow()
-
-    private val _savedServers = MutableStateFlow(clientManager.savedServers)
-    val savedServers: StateFlow<Set<String>> = _savedServers.asStateFlow()
-
-    private val _emailSuffix = MutableStateFlow(clientManager.emailSuffix)
-    val emailSuffix: StateFlow<String> = _emailSuffix.asStateFlow()
-
-    private val _serviceKey = MutableStateFlow(clientManager.serviceKey)
-    val serviceKey: StateFlow<String> = _serviceKey.asStateFlow()
-
-    // Discovery States
-    private val _discoveryState = MutableStateFlow<String>("idle") // "idle", "searching", "found", "failed"
-    val discoveryState: StateFlow<String> = _discoveryState.asStateFlow()
-
-    private val _discoveredServerIp = MutableStateFlow<String?>(null)
-    val discoveredServerIp: StateFlow<String?> = _discoveredServerIp.asStateFlow()
-
-    private val _isScanningServers = MutableStateFlow(false)
-    val isScanningServers: StateFlow<Boolean> = _isScanningServers.asStateFlow()
-
-    // Built-in server state
-    private val _isBuiltInServerRunning = MutableStateFlow(false)
-    val isBuiltInServerRunning: StateFlow<Boolean> = _isBuiltInServerRunning.asStateFlow()
-
-    private val _builtInServerMessage = MutableStateFlow<String?>(null)
-    val builtInServerMessage: StateFlow<String?> = _builtInServerMessage.asStateFlow()
-
-    // Active client Database Name
-    private val _activeDatabase = MutableStateFlow(clientManager.activeDatabase)
-    val activeDatabase: StateFlow<String> = _activeDatabase.asStateFlow()
+    // The beta client exposes one fixed public HTTPS API and no server configuration UI.
+    val serverUrl: StateFlow<String> = MutableStateFlow(clientManager.serverUrl).asStateFlow()
 
     // Remote users fetched dynamically (no local user caching)
     private val _allUsers = MutableStateFlow<List<User>>(emptyList())
@@ -105,17 +70,8 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
     val loggedInUser: StateFlow<User?> = _loggedInUser.asStateFlow()
 
     init {
-        // Force remote mode
-        clientManager.connectionMode = "remote"
-        _connectionMode.value = "remote"
-
-        // Enforce strictly online/server-driven data: delete any leftover cached users from local DB
+        // Enforce strictly online/server-driven data
         viewModelScope.launch {
-            try {
-                userDao.deleteAllUsers()
-            } catch (e: Exception) {
-                // ignore
-            }
             // Fetch remote users list from the server dynamically
             refreshServerUsers()
         }
@@ -127,8 +83,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
             loadUserFiles()
         }
 
-        startAutoDiscovery()
-        startPeriodicConnectionMonitor()
     }
 
     // App settings, language and security
@@ -170,49 +124,12 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // Host Database Server Control
-    fun startServer(port: Int = 8080) {
-        // Built-in server disabled on the client side
-    }
-
-    fun stopServer() {
-        // Built-in server disabled on the client side
-    }
-
-    // Databases Management
-    fun getAvailableDatabases(): List<String> {
-        val storageDir = File(getApplication<Application>().filesDir, "storage")
-        if (!storageDir.exists()) return listOf("default")
-        val dbs = storageDir.listFiles()?.filter { it.isDirectory }?.map { it.name } ?: emptyList()
-        return if (dbs.isEmpty()) listOf("default") else dbs
-    }
-
-    fun createNewDatabase(name: String) {
-        val sanitized = name.trim().ifEmpty { "default" }.replace(Regex("[^a-zA-Z0-9_-]"), "")
-        if (sanitized.isNotEmpty()) {
-            val dbFolder = File(getApplication<Application>().filesDir, "storage/$sanitized")
-            dbFolder.mkdirs()
-            setActiveDatabase(sanitized)
-        }
-    }
-
-    fun setActiveDatabase(name: String) {
-        clientManager.activeDatabase = name
-        _activeDatabase.value = name
-        refreshServerUsers()
-        if (_loggedInUser.value != null) {
-            loadUserFiles()
-        }
-    }
-
     // Server users list loading
     fun refreshServerUsers() {
         viewModelScope.launch {
             try {
-                val apiService = clientManager.getService()
-                val serverUsers = apiService.getUsers().map { networkUser ->
-                    networkUser.toLocalUser("") // Map remote user to User object without password hash exposure
-                }
+                val api = clientManager.getService()
+                val serverUsers = api.getUsers().map { it.toLocalUser("") }
                 _allUsers.value = serverUsers
             } catch (e: Exception) {
                 _allUsers.value = emptyList()
@@ -220,14 +137,13 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // Server-side cloud storage files management
+    // Server-side cloud storage files management (Cloudflare KV-backed Worker only)
     fun loadUserFiles() {
         val user = _loggedInUser.value ?: return
         _isStorageLoading.value = true
         viewModelScope.launch {
             try {
-                val api = clientManager.getService()
-                _userFiles.value = api.getFiles(user.id)
+                _userFiles.value = clientManager.getService().getFiles(user.id)
             } catch (e: Exception) {
                 _userFiles.value = emptyList()
             } finally {
@@ -240,12 +156,14 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         val user = _loggedInUser.value ?: return
         viewModelScope.launch {
             try {
-                val api = clientManager.getService()
-                api.uploadFile(user.id, NetworkUploadFileRequest(fileName = fileName, content = content))
+                clientManager.getService().uploadFile(
+                    user.id,
+                    NetworkUploadFileRequest(fileName = fileName, content = content)
+                )
                 loadUserFiles()
-                onResult(true, "File uploaded successfully")
+                onResult(true, "File uploaded to OrvexaAuth cloud storage")
             } catch (e: Exception) {
-                onResult(false, e.localizedMessage ?: "Upload failed")
+                onResult(false, e.localizedMessage ?: "Remote upload failed")
             }
         }
     }
@@ -254,12 +172,11 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         val user = _loggedInUser.value ?: return
         viewModelScope.launch {
             try {
-                val api = clientManager.getService()
-                api.deleteFile(user.id, fileName)
+                clientManager.getService().deleteFile(user.id, fileName)
                 loadUserFiles()
-                onResult(true, "File deleted successfully")
+                onResult(true, "File deleted from OrvexaAuth cloud storage")
             } catch (e: Exception) {
-                onResult(false, e.localizedMessage ?: "Delete failed")
+                onResult(false, e.localizedMessage ?: "Remote delete failed")
             }
         }
     }
@@ -277,29 +194,22 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
 
     fun getMessagesForPartner(partnerEmail: String): kotlinx.coroutines.flow.Flow<List<Message>> {
         val user = _loggedInUser.value ?: return kotlinx.coroutines.flow.flowOf(emptyList())
-        
-        // Run background task to synchronize messages from server
-        viewModelScope.launch(Dispatchers.IO) {
+        return kotlinx.coroutines.flow.flow {
             try {
-                val api = clientManager.getService()
-                val remoteMsgs = api.getMessages(user.email, partnerEmail)
-                remoteMsgs.forEach { remote ->
-                    val localMsg = Message(
-                        id = remote.id,
-                        senderEmail = remote.senderEmail,
-                        receiverEmail = remote.receiverEmail,
-                        text = remote.text,
-                        timestamp = remote.timestamp
+                val remote = clientManager.getService().getMessages(user.email, partnerEmail)
+                emit(remote.map {
+                    Message(
+                        id = it.id,
+                        senderEmail = it.senderEmail,
+                        receiverEmail = it.receiverEmail,
+                        text = it.text,
+                        timestamp = it.timestamp
                     )
-                    messageDao.insertMessage(localMsg)
-                }
-            } catch (e: Exception) {
-                // Ignore background sync issues
+                })
+            } catch (_: Exception) {
+                emit(emptyList())
             }
         }
-        
-        // Return Flow directly from local database
-        return messageDao.getChatMessages(user.email, partnerEmail)
     }
 
     fun sendMessage(recipientEmail: String, text: String, onResult: (Boolean, String) -> Unit) {
@@ -309,45 +219,19 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
             return
         }
         viewModelScope.launch {
-            val rcpt = recipientEmail.trim().lowercase()
-            
-            // 1. Save locally first (offline-first!)
-            val localMsg = Message(
-                id = (100000..Int.MAX_VALUE).random(),
-                senderEmail = sender.email,
-                receiverEmail = rcpt,
-                text = text.trim(),
-                timestamp = System.currentTimeMillis()
-            )
-            
             try {
-                messageDao.insertMessage(localMsg)
-            } catch (e: Exception) {
-                // Ignore local write failure
-            }
-
-            // 2. Try to send to server
-            try {
-                val api = clientManager.getService()
-                api.sendMessage(SendMessageRequest(sender.email, rcpt, text.trim()))
+                clientManager.getService().sendMessage(
+                    SendMessageRequest(sender.email, recipientEmail.trim().lowercase(), text.trim())
+                )
                 onResult(true, "")
             } catch (e: Exception) {
-                // If timeout or server unreachable, still return success for local database usage
-                onResult(true, "offline")
+                onResult(false, e.localizedMessage ?: "Remote messaging is unavailable")
             }
         }
     }
 
     fun deleteChat(partnerEmail: String) {
-        val user = _loggedInUser.value ?: return
-        viewModelScope.launch {
-            try {
-                // Delete locally
-                messageDao.deleteChat(user.email, partnerEmail.trim().lowercase())
-            } catch (e: Exception) {
-                // ignore
-            }
-        }
+        // The public beta API does not expose message deletion; do not delete locally.
     }
 
     fun deleteMessage(messageId: Int) {
@@ -417,7 +301,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
             if (match != null) {
                 try {
                     val api = clientManager.getService()
-                    api.updatePassword(match.id, NetworkUpdatePasswordRequest(newPass))
+                    api.updatePassword(match.id, NetworkUpdatePasswordRequest(sha256(newPass)))
                     _resetPhone.value = ""
                     _resetGeneratedCode.value = ""
                     _resetInputCode.value = ""
@@ -510,61 +394,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         // Forced remote
     }
 
-    fun setServerUrl(url: String) {
-        val sanitized = if (url.endsWith("/")) url else "$url/"
-        if (clientManager.serverUrl == sanitized) {
-            return
-        }
-        clientManager.serverUrl = sanitized
-        _serverUrl.value = clientManager.serverUrl
-        _savedServers.value = clientManager.savedServers
-        logout() // Auto-logout on server disconnect/change
-        viewModelScope.launch {
-            try {
-                val apiService = clientManager.getService()
-                apiService.checkStatus()
-                _discoveryState.value = "found"
-            } catch (e: Exception) {
-                // Keep existing discovery state or set to failed
-            }
-            refreshServerUsers()
-        }
-    }
-
-    fun addSavedServer(url: String) {
-        val sanitized = if (url.endsWith("/")) url else "$url/"
-        val updated = clientManager.savedServers.toMutableSet()
-        updated.add(sanitized)
-        clientManager.savedServers = updated
-        _savedServers.value = updated
-    }
-
-    fun removeSavedServer(url: String) {
-        val sanitized = if (url.endsWith("/")) url else "$url/"
-        val updated = clientManager.savedServers.toMutableSet()
-        updated.remove(sanitized)
-        clientManager.savedServers = updated
-        _savedServers.value = updated
-    }
-
-    fun setEmailSuffix(suffix: String) {
-        val formatted = if (suffix.startsWith("@")) suffix else "@$suffix"
-        if (clientManager.emailSuffix == formatted) {
-            return
-        }
-        clientManager.emailSuffix = formatted
-        _emailSuffix.value = formatted
-        logout() // Auto-logout on suffix change
-    }
-
-    fun setServiceKey(key: String) {
-        if (clientManager.serviceKey == key) {
-            return
-        }
-        clientManager.serviceKey = key
-        _serviceKey.value = key
-        logout() // Auto-logout on key change
-    }
 
     fun selectLoginUser(user: User) {
         _loginEmail.value = user.email
@@ -604,45 +433,34 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 return@launch
             }
             try {
-                val apiService = clientManager.getService()
-                val response = apiService.login(NetworkLoginRequest(email, password))
-                val localUser = response.toLocalUser(password)
+                val passwordHash = sha256(password)
+                val response = clientManager.getService().login(
+                    NetworkLoginRequest(email = email, passwordHash = passwordHash)
+                )
+                val remoteUser = response.toLocalUser(passwordHash)
 
-                // Key Protect requested every time on login
-                if (!_requireKeyProtect.value) {
-                    _requireKeyProtect.value = true
-                    _loginError.value = "Key Protect code required to complete login."
-                    return@launch
-                }
-
-                if (keyProtectInput.trim() != localUser.keyProtect.trim()) {
-                    _loginError.value = "Invalid Key Protect code"
-                    return@launch
-                }
-
-                // Keep logged-in user in memory and store locally
-                _loggedInUser.value = localUser
+                // OrvexaAuth Beta uses the public API as the only account backend.
+                _loggedInUser.value = remoteUser
                 _loginError.value = null
                 _requireKeyProtect.value = false
                 _loginKeyProtect.value = ""
 
                 // Save active session for auto-login
-                clientManager.saveSession(email, password)
-                clientManager.saveLoggedInUser(localUser)
+                clientManager.saveSession(email, passwordHash)
+                clientManager.saveLoggedInUser(remoteUser)
 
                 refreshServerUsers()
                 loadUserFiles()
                 onSuccess()
-            } catch (e: retrofit2.HttpException) {
-                if (e.code() == 401 || e.code() == 404) {
-                    _loginError.value = "Invalid email or password"
-                } else {
-                    _loginError.value = "Server error: ${e.message()}"
-                }
             } catch (e: Exception) {
                 _loginError.value = "Server authentication error: ${e.localizedMessage ?: "Connection refused"}"
             }
         }
+    }
+
+    private fun sha256(value: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
     }
 
     fun logout() {
@@ -651,7 +469,9 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         _loggedInUser.value = null
         _loginPassword.value = ""
         _userFiles.value = emptyList()
+
     }
+
 
     // Setters for Registration
     fun setRegNames(first: String, last: String) {
@@ -671,11 +491,11 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
     fun generateSuggestions() {
         val first = _regFirstName.value.trim().lowercase().filter { it.isLetterOrDigit() && !it.isWhitespace() }
         val last = _regLastName.value.trim().lowercase().filter { it.isLetterOrDigit() && !it.isWhitespace() }
-        val suffix = _emailSuffix.value
-        
+        val suffix = ""
+
         val validFirst = first.isNotBlank()
         val validLast = last.isNotBlank()
-        
+
         if (!validFirst && !validLast) {
             _emailSuggestions.value = listOf("user123$suffix", "account$suffix")
             return
@@ -803,53 +623,34 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
             }
 
             try {
-                val apiService = clientManager.getService()
-                
-                // KeyProtect is set as the account password
-                val keyProtect = password
-                
-                val request = NetworkRegisterRequest(
-                    email = email,
-                    passwordHash = password,
-                    firstName = firstName,
-                    lastName = lastName,
-                    birthDate = dob,
-                    gender = _regGender.value,
-                    avatarColor = randomColor,
-                    phoneNumber = _regPhoneNumber.value.trim(),
-                    recoveryEmail = _regRecoveryEmail.value.trim(),
-                    ipAddress = clientManager.deviceIp,
-                    macAddress = clientManager.deviceMac,
-                    keyProtect = keyProtect,
-                    dataQuotaMb = 200
+                val passwordHash = sha256(password)
+                val response = clientManager.getService().register(
+                    NetworkRegisterRequest(
+                        email = email,
+                        passwordHash = passwordHash,
+                        firstName = firstName,
+                        lastName = lastName,
+                        birthDate = dob,
+                        gender = _regGender.value,
+                        avatarColor = randomColor,
+                        ipAddress = clientManager.deviceIp,
+                        macAddress = clientManager.deviceMac,
+                        keyProtect = ""
+                    )
                 )
-                val response = apiService.register(request)
-                val localUser = response.toLocalUser(password)
-                
-                // Save user session and insert into local Room DB
+                val localUser = response.toLocalUser(passwordHash)
+
+                // Keep only the local session record; all account data remains server-authoritative.
                 _loggedInUser.value = localUser
                 _regError.value = null
                 resetRegDraft()
-                
-                clientManager.saveSession(email, password)
+
+                clientManager.saveSession(email, passwordHash)
                 clientManager.saveLoggedInUser(localUser)
-                
+
                 refreshServerUsers()
                 loadUserFiles()
                 onSuccess()
-            } catch (e: retrofit2.HttpException) {
-                val errorMsg = try {
-                    val errorBody = e.response()?.errorBody()?.string()
-                    if (errorBody != null && errorBody.contains("\"message\"")) {
-                        val messageValue = errorBody.substringAfter("\"message\"").substringAfter("\"").substringBefore("\"")
-                        messageValue
-                    } else {
-                        "HTTP ${e.code()}: ${e.message()}"
-                    }
-                } catch (jsonEx: Exception) {
-                    "HTTP ${e.code()}: ${e.message()}"
-                }
-                _regError.value = "Registration failed: $errorMsg"
             } catch (e: Exception) {
                 _regError.value = "Registration failed: ${e.localizedMessage ?: "Connection refused"}"
             }
@@ -877,8 +678,8 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         lastName: String,
         birthDate: String,
         gender: String,
-        phoneNumber: String,
-        recoveryEmail: String,
+        phoneNumber: String = "",
+        recoveryEmail: String = "",
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
@@ -895,14 +696,13 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                     firstName = firstName.trim(),
                     lastName = lastName.trim(),
                     birthDate = birthDate,
-                    gender = gender,
-                    phoneNumber = phoneNumber.trim(),
-                    recoveryEmail = recoveryEmail.trim()
+                    gender = gender
                 )
                 val response = apiService.updateProfile(currentUser.id, request)
-                
+
                 val updatedUser = response.toLocalUser(currentUser.passwordHash)
                 _loggedInUser.value = updatedUser
+                clientManager.saveLoggedInUser(updatedUser)
                 onSuccess()
             } catch (e: Exception) {
                 onError("Remote update failed: ${e.localizedMessage ?: "Server offline"}")
@@ -920,9 +720,10 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             try {
                 val apiService = clientManager.getService()
-                apiService.updatePassword(currentUser.id, NetworkUpdatePasswordRequest(newPass))
-                
-                val updatedUser = currentUser.copy(passwordHash = newPass)
+                val newPasswordHash = sha256(newPass)
+                apiService.updatePassword(currentUser.id, NetworkUpdatePasswordRequest(newPasswordHash))
+
+                val updatedUser = currentUser.copy(passwordHash = newPasswordHash)
                 _loggedInUser.value = updatedUser
                 onSuccess()
             } catch (e: Exception) {
@@ -945,13 +746,14 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
 
     fun deleteAccount(onSuccess: () -> Unit) {
         val currentUser = _loggedInUser.value ?: return
-        
+
         viewModelScope.launch {
             try {
                 val apiService = clientManager.getService()
                 apiService.deleteAccount(currentUser.id)
             } catch (e: Exception) {
-                // allow fallback
+                // The public beta keeps the current session intact when remote deletion fails.
+                return@launch
             }
             _loggedInUser.value = null
             onSuccess()
@@ -963,340 +765,11 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
             try {
                 val apiService = clientManager.getService()
                 val response = apiService.checkStatus()
-                _discoveryState.value = "found"
                 refreshServerUsers()
-                onResult(true, "Connected to: ${response.status} (${response.message})")
+                onResult(true, "OrvexaAuth API is online")
             } catch (e: Exception) {
                 onResult(false, "Server unreachable: ${e.localizedMessage ?: "Connection timed out"}")
             }
-        }
-    }
-
-    // --- AUTOMATIC SERVER DISCOVERY SYSTEM ---
-
-    fun startAutoDiscovery(onComplete: (Boolean) -> Unit = {}) {
-        _discoveryState.value = "searching"
-        _discoveredServerIp.value = null
-        viewModelScope.launch {
-            val udpUrl = discoverServerViaUdp()
-            if (udpUrl != null) {
-                setServerUrl(udpUrl)
-                _discoveredServerIp.value = udpUrl
-                _discoveryState.value = "found"
-                refreshServerUsers()
-                onComplete(true)
-                return@launch
-            }
-
-            val scannedUrl = discoverServerViaSubnetScan()
-            if (scannedUrl != null) {
-                setServerUrl(scannedUrl)
-                _discoveredServerIp.value = scannedUrl
-                _discoveryState.value = "found"
-                refreshServerUsers()
-                onComplete(true)
-            } else {
-                _discoveryState.value = "failed"
-                _allUsers.value = emptyList()
-                onComplete(false)
-            }
-        }
-    }
-
-    private fun getLocalIpAddresses(): List<String> {
-        val ipList = mutableListOf<String>()
-        try {
-            val interfaces = NetworkInterface.getNetworkInterfaces()
-            while (interfaces.hasMoreElements()) {
-                val iface = interfaces.nextElement()
-                if (iface.isLoopback || !iface.isUp) continue
-                val addresses = iface.inetAddresses
-                while (addresses.hasMoreElements()) {
-                    val addr = addresses.nextElement()
-                    if (addr is Inet4Address) {
-                        addr.hostAddress?.let { ipList.add(it) }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        return ipList
-    }
-
-    private suspend fun discoverServerViaUdp(): String? = withContext(Dispatchers.IO) {
-        var socket: java.net.DatagramSocket? = null
-        try {
-            socket = java.net.DatagramSocket().apply {
-                broadcast = true
-                soTimeout = 1500
-            }
-            val sendData = "NETAUTH_DISCOVER".toByteArray()
-            val broadcastAddr = java.net.InetAddress.getByName("255.255.255.255")
-            val sendPacket = java.net.DatagramPacket(sendData, sendData.size, broadcastAddr, 8888)
-            
-            for (i in 0..2) {
-                socket.send(sendPacket)
-                kotlinx.coroutines.delay(100)
-            }
-
-            val recvBuf = ByteArray(1024)
-            val receivePacket = java.net.DatagramPacket(recvBuf, recvBuf.size)
-            socket.receive(receivePacket)
-
-            val message = String(receivePacket.data, 0, receivePacket.length).trim()
-            if (message.startsWith("NETAUTH_SERVER:")) {
-                return@withContext message.substringAfter("NETAUTH_SERVER:")
-            }
-        } catch (e: Exception) {
-            // timeout
-        } finally {
-            socket?.close()
-        }
-        null
-    }
-
-    private suspend fun discoverAllServersViaUdp(): List<String> = withContext(Dispatchers.IO) {
-        val foundUrls = mutableListOf<String>()
-        var socket: java.net.DatagramSocket? = null
-        try {
-            socket = java.net.DatagramSocket().apply {
-                broadcast = true
-                soTimeout = 800
-            }
-            val sendData = "NETAUTH_DISCOVER".toByteArray()
-            val broadcastAddr = java.net.InetAddress.getByName("255.255.255.255")
-            val sendPacket = java.net.DatagramPacket(sendData, sendData.size, broadcastAddr, 8888)
-            
-            for (i in 0..1) {
-                socket.send(sendPacket)
-                kotlinx.coroutines.delay(50)
-            }
-
-            val recvBuf = ByteArray(1024)
-            val startTime = System.currentTimeMillis()
-            while (System.currentTimeMillis() - startTime < 800) {
-                try {
-                    val receivePacket = java.net.DatagramPacket(recvBuf, recvBuf.size)
-                    socket.receive(receivePacket)
-                    val message = String(receivePacket.data, 0, receivePacket.length).trim()
-                    if (message.startsWith("NETAUTH_SERVER:")) {
-                        val url = message.substringAfter("NETAUTH_SERVER:")
-                        if (!foundUrls.contains(url)) {
-                            foundUrls.add(url)
-                        }
-                    }
-                } catch (e: java.net.SocketTimeoutException) {
-                    break
-                } catch (e: Exception) {
-                    // ignore
-                }
-            }
-        } catch (e: Exception) {
-            // ignore
-        } finally {
-            socket?.close()
-        }
-        foundUrls
-    }
-
-    private suspend fun discoverAllServersViaSubnetScan(): List<String> = withContext(Dispatchers.IO) {
-        val ips = getLocalIpAddresses()
-        val subnets = ips.map { ip ->
-            val parts = ip.split(".")
-            if (parts.size == 4) "${parts[0]}.${parts[1]}.${parts[2]}." else null
-        }.filterNotNull().distinct()
-
-        if (subnets.isEmpty()) return@withContext emptyList<String>()
-
-        val scanClient = OkHttpClient.Builder()
-            .connectTimeout(250, TimeUnit.MILLISECONDS)
-            .readTimeout(250, TimeUnit.MILLISECONDS)
-            .build()
-
-        val foundUrls = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-
-        coroutineScope {
-            val jobs = mutableListOf<kotlinx.coroutines.Deferred<Unit>>()
-            for (subnet in subnets) {
-                for (i in 1..254) {
-                    val hostIp = "$subnet$i"
-                    val job = async {
-                        try {
-                            val request = Request.Builder()
-                                .url("http://$hostIp:8080/api/status")
-                                .build()
-                            scanClient.newCall(request).execute().use { response ->
-                                if (response.isSuccessful) {
-                                    val body = response.body?.string() ?: ""
-                                    if (body.contains("status") || response.code == 200) {
-                                        foundUrls.add("http://$hostIp:8080/")
-                                    }
-                                }
-                            }
-                        } catch (e: Exception) {
-                            // ignore
-                        }
-                    }
-                    jobs.add(job)
-                }
-            }
-            jobs.awaitAll()
-        }
-        foundUrls.toList()
-    }
-
-    fun scanForAllNearbyServers(onResult: (Int) -> Unit = {}) {
-        if (_isScanningServers.value) return
-        _isScanningServers.value = true
-        viewModelScope.launch {
-            try {
-                val udpUrls = async { discoverAllServersViaUdp() }
-                val subnetUrls = async { discoverAllServersViaSubnetScan() }
-                
-                val allFound = (udpUrls.await() + subnetUrls.await()).distinct()
-                
-                if (allFound.isNotEmpty()) {
-                    val updated = clientManager.savedServers.toMutableSet()
-                    updated.addAll(allFound)
-                    clientManager.savedServers = updated
-                    _savedServers.value = updated
-                    
-                    // If current server is empty or offline, switch to the first found
-                    val isCurrentAlive = try {
-                        val apiService = clientManager.getService()
-                        apiService.checkStatus()
-                        true
-                    } catch (e: Exception) {
-                        false
-                    }
-                    if (!isCurrentAlive) {
-                        setServerUrl(allFound.first())
-                    }
-                }
-                _isScanningServers.value = false
-                onResult(allFound.size)
-            } catch (e: Exception) {
-                _isScanningServers.value = false
-                onResult(0)
-            }
-        }
-    }
-
-    private suspend fun discoverServerViaSubnetScan(): String? = withContext(Dispatchers.IO) {
-        val ips = getLocalIpAddresses()
-        val subnets = ips.map { ip ->
-            val parts = ip.split(".")
-            if (parts.size == 4) "${parts[0]}.${parts[1]}.${parts[2]}." else null
-        }.filterNotNull().distinct()
-
-        if (subnets.isEmpty()) return@withContext null
-
-        val scanClient = OkHttpClient.Builder()
-            .connectTimeout(300, TimeUnit.MILLISECONDS)
-            .readTimeout(300, TimeUnit.MILLISECONDS)
-            .build()
-
-        val foundUrl = java.util.concurrent.atomic.AtomicReference<String?>(null)
-
-        coroutineScope {
-            val jobs = mutableListOf<kotlinx.coroutines.Deferred<Unit>>()
-            for (subnet in subnets) {
-                for (i in 1..254) {
-                    if (foundUrl.get() != null) break
-                    val hostIp = "$subnet$i"
-                    val job = async {
-                        if (foundUrl.get() != null) return@async
-                        try {
-                            val request = Request.Builder()
-                                .url("http://$hostIp:8080/api/status")
-                                .build()
-                            scanClient.newCall(request).execute().use { response ->
-                                if (response.isSuccessful) {
-                                    val body = response.body?.string() ?: ""
-                                    if (body.contains("status") || response.code == 200) {
-                                        foundUrl.compareAndSet(null, "http://$hostIp:8080/")
-                                    }
-                                }
-                            }
-                        } catch (e: Exception) {
-                            // ignore
-                        }
-                    }
-                    jobs.add(job)
-                }
-            }
-
-            for (job in jobs) {
-                job.join()
-                if (foundUrl.get() != null) {
-                    coroutineContext.cancelChildren()
-                    break
-                }
-            }
-        }
-        foundUrl.get()
-    }
-
-    private fun startPeriodicConnectionMonitor() {
-        viewModelScope.launch(Dispatchers.IO) {
-            while (true) {
-                kotlinx.coroutines.delay(5000)
-                val currentState = _discoveryState.value
-                val currentUrl = _serverUrl.value
-
-                if (!currentUrl.isNullOrBlank()) {
-                    val isAlive = pingServer(currentUrl)
-                    if (isAlive) {
-                        if (currentState != "found") {
-                            withContext(Dispatchers.Main) {
-                                _discoveryState.value = "found"
-                            }
-                        }
-                    } else {
-                        if (currentState == "found") {
-                            withContext(Dispatchers.Main) {
-                                _discoveryState.value = "failed"
-                            }
-                        }
-                        // Only try lightweight UDP discovery in background
-                        val udpUrl = discoverServerViaUdp()
-                        if (udpUrl != null && udpUrl != currentUrl) {
-                            withContext(Dispatchers.Main) {
-                                setServerUrl(udpUrl)
-                                _discoveredServerIp.value = udpUrl
-                                _discoveryState.value = "found"
-                            }
-                        }
-                    }
-                } else {
-                    val udpUrl = discoverServerViaUdp()
-                    if (udpUrl != null) {
-                        withContext(Dispatchers.Main) {
-                            setServerUrl(udpUrl)
-                            _discoveredServerIp.value = udpUrl
-                            _discoveryState.value = "found"
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private suspend fun pingServer(url: String): Boolean {
-        return try {
-            val scanClient = OkHttpClient.Builder()
-                .connectTimeout(3000, TimeUnit.MILLISECONDS)
-                .readTimeout(3000, TimeUnit.MILLISECONDS)
-                .build()
-            val request = Request.Builder()
-                .url(if (url.endsWith("/")) "${url}api/status" else "$url/api/status")
-                .build()
-            scanClient.newCall(request).execute().use { response ->
-                response.isSuccessful
-            }
-        } catch (e: Exception) {
-            false
         }
     }
 
@@ -1341,35 +814,8 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun importServiceKeyFromJson(file: File, callback: (Boolean, String) -> Unit) {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val content = file.readText()
-                val json = org.json.JSONObject(content)
-                val serverUrl = json.optString("server_url", "")
-                val serviceKey = json.optString("service_key", "")
-                val emailSuffix = json.optString("email_suffix", "")
-                
-                if (serverUrl.isEmpty() || serviceKey.isEmpty()) {
-                    withContext(Dispatchers.Main) {
-                        callback(false, "Invalid service key file format.")
-                    }
-                    return@launch
-                }
-                
-                withContext(Dispatchers.Main) {
-                    setServerUrl(serverUrl)
-                    setServiceKey(serviceKey)
-                    if (emailSuffix.isNotEmpty()) {
-                        setEmailSuffix(emailSuffix)
-                    }
-                    callback(true, "Imported Service Key successfully and connected to $serverUrl")
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    callback(false, "Failed to parse JSON service key: ${e.localizedMessage}")
-                }
-            }
-        }
+        // Legacy service-key files are intentionally unsupported in the public beta.
+        callback(false, "Service-key files are not supported. OrvexaAuth Beta uses its public Cloudflare Worker.")
     }
 
     fun exportAccountsToAf(file: File, onResult: (Boolean, String) -> Unit) {
@@ -1396,7 +842,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val apiService = clientManager.getService()
-                
+
                 // 1. Download User Cloud Files
                 val filesList = try {
                     apiService.getFiles(user.id)
@@ -1418,19 +864,18 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                         // ignore file download errors
                     }
                 }
-                
+
                 // 2. Fetch Chat Conversations
                 val chats = mutableListOf<Map<String, Any>>()
                 val otherUsers = _allUsers.value.filter { it.email.lowercase() != user.email.lowercase() }
                 otherUsers.forEach { other ->
                     try {
-                        val localMsgs = messageDao.getChatMessagesList(user.email, other.email)
                         val serverMsgs = try {
                             apiService.getMessages(user.email, other.email)
                         } catch (e: Exception) {
                             emptyList()
                         }
-                        val allMsgs = (localMsgs + serverMsgs.map { networkMsg ->
+                        val allMsgs = serverMsgs.map { networkMsg ->
                             Message(
                                 id = networkMsg.id,
                                 senderEmail = networkMsg.senderEmail,
@@ -1438,8 +883,8 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                                 text = networkMsg.text,
                                 timestamp = networkMsg.timestamp
                             )
-                        }).distinctBy { it.id }
-                        
+                        }.distinctBy { it.id }
+
                         if (allMsgs.isNotEmpty()) {
                             val msgMaps = allMsgs.map { m ->
                                 mapOf(
@@ -1459,7 +904,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                         // ignore chat retrieval errors
                     }
                 }
-                
+
                 // 3. User Profile Information
                 val userProfile = mapOf(
                     "email" to user.email,
@@ -1476,10 +921,10 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                     "keyProtect" to user.keyProtect,
                     "dataQuotaMb" to user.dataQuotaMb
                 )
-                
+
                 // 4. Blocklist
                 val blocklist = _blockedUsers.value.toList()
-                
+
                 // Combine into master backup map
                 val backupMap = mapOf(
                     "fileFormat" to "NetAuthAccountBackup",
@@ -1490,12 +935,12 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                     "userFiles" to userFiles,
                     "chats" to chats
                 )
-                
+
                 val moshi = com.squareup.moshi.Moshi.Builder().build()
                 val adapter = moshi.adapter(Any::class.java)
                 val jsonStr = adapter.toJson(backupMap)
                 file.writeText(jsonStr, Charsets.UTF_8)
-                
+
                 withContext(Dispatchers.Main) {
                     onResult(true, "Full account backup for ${user.email} exported successfully to ${file.name}")
                 }
@@ -1515,22 +960,30 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 val allUserMsgs = mutableListOf<Message>()
                 otherUsers.forEach { other ->
                     try {
-                        val messages = messageDao.getChatMessagesList(userEmail, other.email)
+                        val messages = clientManager.getService().getMessages(userEmail, other.email).map { networkMsg ->
+                            Message(
+                                id = networkMsg.id,
+                                senderEmail = networkMsg.senderEmail,
+                                receiverEmail = networkMsg.receiverEmail,
+                                text = networkMsg.text,
+                                timestamp = networkMsg.timestamp
+                            )
+                        }
                         allUserMsgs.addAll(messages)
                     } catch (e: Exception) {
                         // ignore individual failures
                     }
                 }
-                
+
                 // Remove potential duplicate messages
                 val distinctMsgs = allUserMsgs.distinctBy { it.id }
-                
+
                 // Find primary conversation partner
                 val interlocutors = distinctMsgs.flatMap { listOf(it.senderEmail, it.receiverEmail) }
                     .distinct()
                     .filter { it.lowercase() != userEmail.lowercase() }
                 val primaryPartner = interlocutors.firstOrNull() ?: "Friend"
-                
+
                 val chatTranscript = mapOf(
                     "fileFormat" to "NetAuthChatTranscript",
                     "version" to "1.0",
@@ -1546,12 +999,12 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                         )
                     }
                 )
-                
+
                 val moshi = com.squareup.moshi.Moshi.Builder().build()
                 val adapter = moshi.adapter(Any::class.java)
                 val jsonStr = adapter.toJson(chatTranscript)
                 file.writeText(jsonStr, Charsets.UTF_8)
-                
+
                 withContext(Dispatchers.Main) {
                     onResult(true, "All chat transcripts for $userEmail exported successfully to ${file.name}")
                 }
@@ -1570,9 +1023,9 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 val moshi = com.squareup.moshi.Moshi.Builder().build()
                 val adapter = moshi.adapter(Any::class.java)
                 val parsed = adapter.fromJson(jsonStr)
-                
+
                 val apiService = clientManager.getService()
-                
+
                 if (parsed is Map<*, *> && parsed["fileFormat"] == "NetAuthAccountBackup") {
                     val profile = parsed["userProfile"] as? Map<*, *> ?: throw Exception("Profile data not found in backup")
                     val email = profile["email"] as? String ?: ""
@@ -1588,7 +1041,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                     val macAddress = profile["macAddress"] as? String ?: ""
                     val keyProtect = profile["keyProtect"] as? String ?: ""
                     val dataQuotaMb = (profile["dataQuotaMb"] as? Double)?.toInt() ?: (profile["dataQuotaMb"] as? Int) ?: 200
-                    
+
                     // 1. Register User on the active Database Partition
                     try {
                         apiService.register(NetworkRegisterRequest(
@@ -1599,8 +1052,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                             birthDate = birthDate,
                             gender = gender,
                             avatarColor = avatarColor,
-                            phoneNumber = phoneNumber,
-                            recoveryEmail = recoveryEmail,
                             ipAddress = ipAddress,
                             macAddress = macAddress,
                             keyProtect = keyProtect,
@@ -1609,11 +1060,11 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                     } catch (e: Exception) {
                         // User might exist, continue with restoring assets
                     }
-                    
+
                     refreshServerUsers()
                     val registeredUser = _allUsers.value.find { it.email.lowercase() == email.lowercase() }
                     val targetUserId = registeredUser?.id ?: 1
-                    
+
                     // 2. Restore local blocklist
                     val blocklist = parsed["blocklist"] as? List<*> ?: emptyList<Any>()
                     blocklist.forEach { item ->
@@ -1623,7 +1074,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                             }
                         }
                     }
-                    
+
                     // 3. Restore cloud files
                     val userFiles = parsed["userFiles"] as? List<*> ?: emptyList<Any>()
                     userFiles.forEach { item ->
@@ -1639,7 +1090,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                             }
                         }
                     }
-                    
+
                     // 4. Restore chat messaging transcripts
                     val chatsList = parsed["chats"] as? List<*> ?: emptyList<Any>()
                     chatsList.forEach { chatItem ->
@@ -1652,16 +1103,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                                     val receiverEmail = msgItem["receiverEmail"] as? String ?: ""
                                     val text = msgItem["text"] as? String ?: ""
                                     val timestamp = (msgItem["timestamp"] as? Double)?.toLong() ?: (msgItem["timestamp"] as? Long) ?: System.currentTimeMillis()
-                                    
-                                    val messageObj = Message(
-                                        id = id,
-                                        senderEmail = senderEmail,
-                                        receiverEmail = receiverEmail,
-                                        text = text,
-                                        timestamp = timestamp
-                                    )
-                                    messageDao.insertMessage(messageObj)
-                                    
+
                                     try {
                                         apiService.sendMessage(SendMessageRequest(
                                             senderEmail = senderEmail,
@@ -1675,7 +1117,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                             }
                         }
                     }
-                    
+
                     withContext(Dispatchers.Main) {
                         logout()
                         refreshServerUsers()
@@ -1686,7 +1128,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                     val listType = com.squareup.moshi.Types.newParameterizedType(List::class.java, User::class.java)
                     val listAdapter = moshi.adapter<List<User>>(listType)
                     val usersList = listAdapter.fromJson(jsonStr) ?: emptyList()
-                    
+
                     val apiServiceLeg = clientManager.getService()
                     var importedCount = 0
                     usersList.forEach { user ->
@@ -1699,8 +1141,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                                 birthDate = user.birthDate,
                                 gender = user.gender,
                                 avatarColor = user.avatarColor,
-                                phoneNumber = user.phoneNumber,
-                                recoveryEmail = user.recoveryEmail,
                                 ipAddress = user.ipAddress,
                                 macAddress = user.macAddress,
                                 keyProtect = user.keyProtect,
@@ -1711,7 +1151,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                             // ignore duplicate registration
                         }
                     }
-                    
+
                     withContext(Dispatchers.Main) {
                         logout()
                         refreshServerUsers()
@@ -1738,7 +1178,15 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
     fun exportUserChatToChat(userEmail: String, partnerEmail: String, file: File, onResult: (Boolean, String) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val messagesList = messageDao.getChatMessagesList(userEmail, partnerEmail)
+                val messagesList = clientManager.getService().getMessages(userEmail, partnerEmail).map { networkMsg ->
+                    Message(
+                        id = networkMsg.id,
+                        senderEmail = networkMsg.senderEmail,
+                        receiverEmail = networkMsg.receiverEmail,
+                        text = networkMsg.text,
+                        timestamp = networkMsg.timestamp
+                    )
+                }
                 val moshi = com.squareup.moshi.Moshi.Builder().build()
                 val listType = com.squareup.moshi.Types.newParameterizedType(List::class.java, Message::class.java)
                 val adapter = moshi.adapter<List<Message>>(listType)
@@ -1763,13 +1211,21 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 val listType = com.squareup.moshi.Types.newParameterizedType(List::class.java, Message::class.java)
                 val adapter = moshi.adapter<List<Message>>(listType)
                 val messagesList = adapter.fromJson(jsonStr) ?: emptyList()
-                
+
+                val apiService = clientManager.getService()
+                var importedCount = 0
                 messagesList.forEach { message ->
-                    messageDao.insertMessage(message)
+                    runCatching {
+                        apiService.sendMessage(SendMessageRequest(
+                            senderEmail = message.senderEmail,
+                            receiverEmail = message.receiverEmail,
+                            text = message.text
+                        ))
+                    }.onSuccess { importedCount++ }
                 }
-                
+
                 withContext(Dispatchers.Main) {
-                    onResult(true, "Imported ${messagesList.size} messages successfully from ${file.name}")
+                    onResult(true, "Uploaded $importedCount of ${messagesList.size} messages to OrvexaAuth from ${file.name}")
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {

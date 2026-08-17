@@ -1,40 +1,68 @@
 package com.example.data
 
-import androidx.room.Entity
-import androidx.room.PrimaryKey
-import androidx.room.Dao
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
-import androidx.room.Query
-import androidx.room.Delete
+import android.content.Context
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 
-@Entity(tableName = "messages")
+/** Message exchanged through the public OrvexaAuth API. */
 data class Message(
-    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val id: Int = 0,
     val senderEmail: String,
     val receiverEmail: String,
     val text: String,
     val timestamp: Long = System.currentTimeMillis()
 )
 
-@Dao
-interface MessageDao {
-    @Query("SELECT * FROM messages WHERE (senderEmail = :user1 AND receiverEmail = :user2) OR (senderEmail = :user2 AND receiverEmail = :user1) ORDER BY timestamp ASC")
-    fun getChatMessages(user1: String, user2: String): Flow<List<Message>>
+/**
+ * Compatibility adapter for the existing chat UI.
+ * Messages are fetched from and sent to the Cloudflare Worker; no Firebase or
+ * local message database is used in OrvexaAuth Beta.
+ */
+class MessageDao(context: Context) {
+    private val clientManager = NetAuthClientManager(context)
 
-    @Query("SELECT * FROM messages WHERE (senderEmail = :user1 AND receiverEmail = :user2) OR (senderEmail = :user2 AND receiverEmail = :user1) ORDER BY timestamp ASC")
-    suspend fun getChatMessagesList(user1: String, user2: String): List<Message>
+    private suspend fun fetchMessages(user1: String, user2: String): List<Message> = runCatching {
+        clientManager.getService().getMessages(user1, user2).map {
+            Message(
+                id = it.id,
+                senderEmail = it.senderEmail,
+                receiverEmail = it.receiverEmail,
+                text = it.text,
+                timestamp = it.timestamp
+            )
+        }.sortedBy { it.timestamp }
+    }.getOrDefault(emptyList())
 
-    @Query("SELECT DISTINCT senderEmail FROM messages WHERE receiverEmail = :userEmail UNION SELECT DISTINCT receiverEmail FROM messages WHERE senderEmail = :userEmail")
-    fun getChatPartners(userEmail: String): Flow<List<String>>
+    fun getChatMessages(user1: String, user2: String): Flow<List<Message>> = flow {
+        emit(fetchMessages(user1, user2))
+    }
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertMessage(message: Message)
+    suspend fun getChatMessagesList(user1: String, user2: String): List<Message> =
+        fetchMessages(user1, user2)
 
-    @Query("DELETE FROM messages WHERE (senderEmail = :user1 AND receiverEmail = :user2) OR (senderEmail = :user2 AND receiverEmail = :user1)")
-    suspend fun deleteChat(user1: String, user2: String)
+    /** The beta API does not expose a global message index, so partners are unknown until opened. */
+    fun getChatPartners(userEmail: String): Flow<List<String>> = flow {
+        emit(emptyList())
+    }
 
-    @Query("DELETE FROM messages WHERE id = :messageId")
-    suspend fun deleteMessage(messageId: Int)
+    suspend fun insertMessage(message: Message) {
+        runCatching {
+            clientManager.getService().sendMessage(
+                SendMessageRequest(
+                    senderEmail = message.senderEmail,
+                    receiverEmail = message.receiverEmail,
+                    text = message.text
+                )
+            )
+        }
+    }
+
+    /** Message deletion is intentionally unavailable in the public beta contract. */
+    suspend fun deleteChat(user1: String, user2: String) {
+        // No local fallback and no destructive public endpoint.
+    }
+
+    suspend fun deleteMessage(messageId: Int) {
+        // No local fallback and no destructive public endpoint.
+    }
 }

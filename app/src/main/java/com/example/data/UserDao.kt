@@ -1,43 +1,94 @@
 package com.example.data
 
-import androidx.room.*
+import android.content.Context
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 
-@Dao
-interface UserDao {
-    @Query("DELETE FROM users")
-    suspend fun deleteAllUsers()
+/**
+ * Compatibility adapter retained for the existing UI/repository layer.
+ * OrvexaAuth Beta has no local database and no Firebase dependency: user reads and
+ * profile writes are routed to the public Cloudflare Worker through Retrofit.
+ */
+class UserDao(context: Context) {
+    private val clientManager = NetAuthClientManager(context)
 
-    @Query("SELECT * FROM users ORDER BY createdAt DESC")
-    fun getAllUsers(): Flow<List<User>>
+    private suspend fun fetchUsers(): List<User> = runCatching {
+        clientManager.getService().getUsers().map { it.toLocalUser("") }
+    }.getOrDefault(emptyList())
 
-    @Query("SELECT * FROM users WHERE email = :email LIMIT 1")
-    suspend fun getUserByEmail(email: String): User?
+    suspend fun deleteAllUsers() {
+        // Deliberately disabled: a public beta client must not expose a destructive
+        // database-wide operation.
+    }
 
-    @Query("SELECT * FROM users WHERE firstName = :firstName AND lastName = :lastName LIMIT 1")
-    suspend fun getUserByFirstAndLastName(firstName: String, lastName: String): User?
+    fun getAllUsers(): Flow<List<User>> = flow {
+        emit(fetchUsers())
+    }
 
-    @Query("SELECT * FROM users WHERE id = :id LIMIT 1")
-    suspend fun getUserById(id: Int): User?
+    suspend fun getUserByEmail(email: String): User? =
+        fetchUsers().firstOrNull { it.email.equals(email.trim(), ignoreCase = true) }
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertUser(user: User): Long
+    suspend fun getUserByFirstAndLastName(firstName: String, lastName: String): User? =
+        fetchUsers().firstOrNull {
+            it.firstName.equals(firstName, ignoreCase = true) &&
+                it.lastName.equals(lastName, ignoreCase = true)
+        }
 
-    @Update
-    suspend fun updateUser(user: User)
+    suspend fun getUserById(id: Int): User? =
+        fetchUsers().firstOrNull { it.id == id }
 
-    @Delete
-    suspend fun deleteUser(user: User)
+    suspend fun insertUser(user: User): Long = runCatching {
+        val response = clientManager.getService().register(
+            NetworkRegisterRequest(
+                email = user.email,
+                passwordHash = user.passwordHash,
+                firstName = user.firstName,
+                lastName = user.lastName,
+                birthDate = user.birthDate,
+                gender = user.gender,
+                avatarColor = user.avatarColor,
+                ipAddress = user.ipAddress,
+                macAddress = user.macAddress,
+                keyProtect = user.keyProtect,
+                dataQuotaMb = user.dataQuotaMb
+            )
+        )
+        response.id.toLong()
+    }.getOrDefault(0L)
 
-    @Query("SELECT * FROM banned_hardware ORDER BY bannedAt DESC")
-    fun getAllBannedHardware(): Flow<List<BannedHardware>>
+    suspend fun updateUser(user: User) {
+        runCatching {
+            clientManager.getService().updateProfile(
+                user.id,
+                NetworkUpdateProfileRequest(
+                    firstName = user.firstName,
+                    lastName = user.lastName,
+                    birthDate = user.birthDate,
+                    gender = user.gender,
+                )
+            )
+        }
+    }
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertBan(ban: BannedHardware)
+    suspend fun deleteUser(user: User) {
+        runCatching { clientManager.getService().deleteAccount(user.id) }
+    }
 
-    @Delete
-    suspend fun deleteBan(ban: BannedHardware)
+    /**
+     * Hardware-ban endpoints are not part of the public beta API. Return an empty
+     * remote result instead of falling back to Firestore or a local database.
+     */
+    fun getAllBannedHardware(): Flow<List<BannedHardware>> = flow {
+        emit(emptyList())
+    }
 
-    @Query("SELECT EXISTS(SELECT 1 FROM banned_hardware WHERE hardwareValue = :value LIMIT 1)")
-    suspend fun isHardwareBanned(value: String): Boolean
+    suspend fun insertBan(ban: BannedHardware) {
+        // Unsupported by the public OrvexaAuth Beta contract.
+    }
+
+    suspend fun deleteBan(ban: BannedHardware) {
+        // Unsupported by the public OrvexaAuth Beta contract.
+    }
+
+    suspend fun isHardwareBanned(value: String): Boolean = false
 }

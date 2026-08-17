@@ -1,88 +1,73 @@
-name: Android CI
+name: OrvexaAuth Android Beta
 
 on:
   push:
-    branches: [ "main", "master", "develop" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main", "master", "develop" ]
+    branches: ["main"]
 
 permissions:
   contents: write
 
 jobs:
   build:
-    name: Build Android App
+    name: Build OrvexaAuth Beta 0.1.1
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
-          java-version: '21'
-          distribution: 'temurin'
-          cache: 'gradle'
+          java-version: "21"
+          distribution: "temurin"
+          cache: gradle
 
-      - name: Create environment configuration
-        run: |
-          if [ -f .env.example ]; then
-            cp .env.example .env
-          else
-            touch .env
-          fi
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: 9.3.1
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
 
-      - name: Clean stale wrapper files if any
-        run: |
-          rm -f gradlew gradlew.bat
-          rm -rf gradle/wrapper
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --no-daemon
 
-      - name: Decode or Generate Debug Keystore
-        run: |
-          if [ -f debug.keystore.base64 ]; then
-            echo "Decoding debug.keystore.base64..."
-            base64 -d debug.keystore.base64 > debug.keystore
-          elif [ -f app/debug.keystore.base64 ]; then
-            echo "Decoding app/debug.keystore.base64..."
-            base64 -d app/debug.keystore.base64 > debug.keystore
-          else
-            echo "debug.keystore.base64 not found. Generating a new debug.keystore using keytool..."
-            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-          fi
+      - name: Create APK checksum
+        run: sha256sum app/build/outputs/apk/debug/app-debug.apk > app/build/outputs/apk/debug/app-debug.apk.sha256
 
-      - name: Build with Gradle
-        run: gradle :app:assembleDebug --no-daemon
-
-      - name: Upload Debug APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: orvexaauth-beta-0.1.1
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/debug/app-debug.apk.sha256
 
-      - name: Create GitHub Release
-        if: github.event_name == 'push'
+      - name: Publish GitHub prerelease
+        if: github.event_name == "push" && github.ref == "refs/heads/main"
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "v2.3.1"
-          name: "NetAuth 2.3.1"
-          body: |
-            ### Описание релиза / Release Description
-            Внимание! Данная версия приложения временно **не работает 24/7** и не запустится до тех пор, пока не будет полностью доделана база данных.
-            
-            *Attention! This version is currently **not running 24/7** and won't launch until the database development is completed.*
-            
-            ---
-            **Изменения:**
-            - Полностью настроен рабочий процесс автоматической CI/CD сборки через GitHub Actions.
-            - Автоматический декодинг / генерация подписи debug.keystore при сборке.
-            - Сборка и автоматическая публикация готового установочного файла (.apk).
+          tag_name: "v0.1.1-beta01-${{ github.run_number }}"
+          name: "OrvexaAuth Beta 0.1.1 (build ${{ github.run_number }})"
+          prerelease: true
           draft: false
-          prerelease: false
-          files: app/build/outputs/apk/debug/app-debug.apk
+          make_latest: false
+          body: |
+            ## OrvexaAuth Beta 0.1.1
 
+            Cloudflare-only Android client for the public OrvexaAuth API.
+
+            ### Included
+            - HTTPS-only API transport.
+            - Android Keystore-backed encrypted session material.
+            - No Firebase, Google Sign-In, Google Drive or local server mode.
+            - No saved server endpoints or server discovery UI.
+            - Beta build for testing; backup and recovery features may change.
+
+            Verify the APK with `app-debug.apk.sha256` before installation.
+          files: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/debug/app-debug.apk.sha256
+          fail_on_unmatched_files: true

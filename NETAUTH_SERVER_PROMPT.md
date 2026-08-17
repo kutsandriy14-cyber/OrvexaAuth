@@ -185,6 +185,6 @@ To access your database server from outside your Wi-Fi network (using mobile dat
    ```bash
    ngrok http 8080
    ```
-5. Copy the HTTPS **Forwarding URL** (e.g., `https://a1b2-34-56-78.ngrok-free.app`) and enter it as your **Server URL** in your NetAuth Client app configuration!
+5. Copy the HTTPS **Forwarding URL** (e.g., `https://a1b2-34-56-78.ngrok-free.app`) and enter it as your **Server URL** in your OrvexaAuth Beta app configuration!
 
 Your folder-based cloud server is now fully active, secure, and accessible worldwide!

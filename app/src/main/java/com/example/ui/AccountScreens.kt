@@ -1,6 +1,9 @@
 @file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 
 package com.example.ui
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
@@ -41,6 +44,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.User
 import com.example.data.Message
+import com.example.data.UpdateManager
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -55,9 +59,7 @@ sealed class Screen(val route: String) {
     object SignIn : Screen("sign_in")
     object RegisterName : Screen("register_name")
     object RegisterBirthGender : Screen("register_birth_gender")
-    object RegisterEmail : Screen("register_email")
     object RegisterPassword : Screen("register_password")
-    object RegisterContact : Screen("register_contact")
     object RegisterTerms : Screen("register_terms")
     object Dashboard : Screen("dashboard")
 }
@@ -72,7 +74,7 @@ fun GoogleHeader(
         modifier = modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // NetAuth stylized modern logo
+        // OrvexaAuth Beta stylized modern logo
         Row(
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
@@ -86,7 +88,7 @@ fun GoogleHeader(
             )
             Spacer(modifier = Modifier.width(10.dp))
             Text(
-                text = "NetAuth",
+                text = "OrvexaAuth Beta",
                 color = MaterialTheme.colorScheme.primary,
                 fontSize = 32.sp,
                 fontWeight = FontWeight.Bold,
@@ -116,528 +118,27 @@ fun GoogleHeader(
 }
 
 @Composable
-fun ConnectionSettingsDialog(
-    viewModel: AccountViewModel,
-    onDismiss: () -> Unit
-) {
-    val serverUrl by viewModel.serverUrl.collectAsStateWithLifecycle()
-    val emailSuffix by viewModel.emailSuffix.collectAsStateWithLifecycle()
-    val serviceKey by viewModel.serviceKey.collectAsStateWithLifecycle()
-    val activeDatabase by viewModel.activeDatabase.collectAsStateWithLifecycle()
-
-    var urlInput by remember { mutableStateOf(serverUrl) }
-    var suffixInput by remember { mutableStateOf(emailSuffix) }
-    var serviceKeyInput by remember { mutableStateOf(serviceKey) }
-    var dbInput by remember { mutableStateOf(activeDatabase) }
-    var newDbNameInput by remember { mutableStateOf("") }
-
-    var pingStatus by remember { mutableStateOf<String?>(null) }
-    var isPingSuccessful by remember { mutableStateOf<Boolean?>(null) }
-    var isChecking by remember { mutableStateOf(false) }
-
-    var selectedTab by remember { mutableStateOf(0) }
-    var importStatus by remember { mutableStateOf("") }
-    var manualBanInput by remember { mutableStateOf("") }
-    val context = LocalContext.current
-
-    // Scan downloads folder for .af files
-    var afFiles by remember { mutableStateOf(emptyList<java.io.File>()) }
-    LaunchedEffect(Unit) {
-        afFiles = viewModel.scanLocalFiles(".af")
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Rounded.Settings, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Client & Database Settings", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            }
-        },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 450.dp)
-            ) {
-                TabRow(
-                    selectedTabIndex = selectedTab,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 12.dp)
-                ) {
-                    Tab(
-                        selected = selectedTab == 0,
-                        onClick = { selectedTab = 0 },
-                        text = { Text("Connection", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
-                        icon = { Icon(Icons.Rounded.Wifi, contentDescription = null, modifier = Modifier.size(16.dp)) }
-                    )
-                    Tab(
-                        selected = selectedTab == 1,
-                        onClick = { selectedTab = 1 },
-                        text = { Text("Databases", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
-                        icon = { Icon(Icons.Rounded.Storage, contentDescription = null, modifier = Modifier.size(16.dp)) }
-                    )
-                    Tab(
-                        selected = selectedTab == 2,
-                        onClick = { selectedTab = 2 },
-                        text = { Text("Bans", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
-                        icon = { Icon(Icons.Rounded.Block, contentDescription = null, modifier = Modifier.size(16.dp)) }
-                    )
-                }
-
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    when (selectedTab) {
-                        0 -> {
-                            Text(
-                                text = "Configure connectivity settings to connect to your remote database or website.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-
-                            OutlinedTextField(
-                                value = urlInput,
-                                onValueChange = { 
-                                    urlInput = it
-                                    viewModel.setServerUrl(it)
-                                },
-                                label = { Text("Server URL / IP") },
-                                placeholder = { Text("http://192.168.1.100:8080/") },
-                                modifier = Modifier.fillMaxWidth(),
-                                singleLine = true,
-                                shape = RoundedCornerShape(12.dp)
-                            )
-
-                            OutlinedTextField(
-                                value = suffixInput,
-                                onValueChange = { 
-                                    suffixInput = it
-                                    viewModel.setEmailSuffix(it)
-                                },
-                                label = { Text("Email Suffix / Domain") },
-                                placeholder = { Text("@netauth.lan") },
-                                modifier = Modifier.fillMaxWidth(),
-                                singleLine = true,
-                                shape = RoundedCornerShape(12.dp)
-                            )
-
-                            OutlinedTextField(
-                                value = serviceKeyInput,
-                                onValueChange = { 
-                                    serviceKeyInput = it
-                                    viewModel.setServiceKey(it)
-                                },
-                                label = { Text("X-Service-Key (API Key)") },
-                                placeholder = { Text("my_secure_secret_key") },
-                                modifier = Modifier.fillMaxWidth(),
-                                singleLine = true,
-                                shape = RoundedCornerShape(12.dp)
-                            )
-
-                            Button(
-                                onClick = {
-                                    isChecking = true
-                                    pingStatus = "Pinging server..."
-                                    viewModel.checkServerStatus { success, message ->
-                                        isChecking = false
-                                        isPingSuccessful = success
-                                        pingStatus = message
-                                    }
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                enabled = !isChecking,
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                if (isChecking) {
-                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), color = MaterialTheme.colorScheme.onSecondary)
-                                } else {
-                                    Text("Test WiFi Server Connection")
-                                }
-                            }
-
-                            pingStatus?.let { status ->
-                                Card(
-                                    colors = CardDefaults.cardColors(
-                                        containerColor = if (isPingSuccessful == true) 
-                                            Color(0xFFE8F5E9) else Color(0xFFFFEBEE)
-                                    ),
-                                    shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(10.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(
-                                            imageVector = if (isPingSuccessful == true) Icons.Rounded.CheckCircle else Icons.Rounded.Error,
-                                            contentDescription = null,
-                                            tint = if (isPingSuccessful == true) Color(0xFF2E7D32) else Color(0xFFC62828),
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(
-                                            text = status,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = if (isPingSuccessful == true) Color(0xFF2E7D32) else Color(0xFFC62828)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        1 -> {
-                            Text(
-                                text = "Database Partition Configuration",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-
-                            OutlinedTextField(
-                                value = dbInput,
-                                onValueChange = { 
-                                    dbInput = it
-                                    viewModel.setActiveDatabase(it)
-                                },
-                                label = { Text("X-Database-Name (Active Partition)") },
-                                placeholder = { Text("default") },
-                                modifier = Modifier.fillMaxWidth(),
-                                singleLine = true,
-                                shape = RoundedCornerShape(12.dp)
-                            )
-
-                            var availableDbs by remember { mutableStateOf(viewModel.getAvailableDatabases()) }
-
-                            Text(
-                                text = "Available Local/Server Partitions:",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold
-                            )
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                OutlinedTextField(
-                                    value = newDbNameInput,
-                                    onValueChange = { newDbNameInput = it },
-                                    label = { Text("New Partition") },
-                                    placeholder = { Text("e.g. database_2") },
-                                    modifier = Modifier.weight(1f),
-                                    singleLine = true,
-                                    shape = RoundedCornerShape(8.dp)
-                                )
-
-                                Button(
-                                    onClick = {
-                                        if (newDbNameInput.isNotBlank()) {
-                                            viewModel.createNewDatabase(newDbNameInput)
-                                            dbInput = viewModel.activeDatabase.value
-                                            newDbNameInput = ""
-                                            availableDbs = viewModel.getAvailableDatabases()
-                                        }
-                                    },
-                                    shape = RoundedCornerShape(8.dp),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
-                                ) {
-                                    Text("Create")
-                                }
-                            }
-
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                availableDbs.forEach { db ->
-                                    val isSelected = db.lowercase() == dbInput.lowercase()
-                                    FilterChip(
-                                        selected = isSelected,
-                                        onClick = {
-                                            dbInput = db
-                                            viewModel.setActiveDatabase(db)
-                                        },
-                                        label = { Text(db) },
-                                        leadingIcon = if (isSelected) {
-                                            {
-                                                Icon(
-                                                    imageVector = Icons.Rounded.CheckCircle,
-                                                    contentDescription = null,
-                                                    modifier = Modifier.size(14.dp)
-                                                )
-                                            }
-                                        } else null
-                                    )
-                                }
-                            }
-
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-
-                            Text("Offline Profiles Backups (.af)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-
-                            if (importStatus.isNotEmpty()) {
-                                Card(
-                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text(importStatus, modifier = Modifier.padding(8.dp), style = MaterialTheme.typography.bodySmall)
-                                }
-                            }
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Button(
-                                    onClick = {
-                                        val downloadsDir = java.io.File("/storage/emulated/0/Download")
-                                        if (!downloadsDir.exists()) downloadsDir.mkdirs()
-                                        val file = java.io.File(downloadsDir, "netauth_backup.af")
-                                        viewModel.exportAccountsToAf(file) { success, msg ->
-                                            importStatus = msg
-                                            if (success) {
-                                                android.widget.Toast.makeText(context, "Exported successfully to Downloads!", android.widget.Toast.LENGTH_LONG).show()
-                                            }
-                                        }
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(8.dp)
-                                ) {
-                                    Icon(Icons.Rounded.Upload, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Export .af", fontSize = 11.sp)
-                                }
-
-                                Button(
-                                    onClick = {
-                                        val scan = viewModel.scanLocalFiles(".af")
-                                        if (scan.isNotEmpty()) {
-                                            viewModel.importAccountsFromAf(scan.first()) { success, msg ->
-                                                importStatus = msg
-                                                if (success) {
-                                                    android.widget.Toast.makeText(context, "Imported ${scan.first().name} successfully!", android.widget.Toast.LENGTH_LONG).show()
-                                                }
-                                            }
-                                        } else {
-                                            importStatus = "No .af backup file detected in Download folder."
-                                        }
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(8.dp)
-                                ) {
-                                    Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Import .af", fontSize = 11.sp)
-                                }
-                            }
-
-                            Button(
-                                onClick = {
-                                    val scan = viewModel.scanLocalFiles(".json")
-                                    val serviceFile = scan.find { it.name.contains("service") || it.name.contains("servise") }
-                                    if (serviceFile != null) {
-                                        viewModel.importServiceKeyFromJson(serviceFile) { success, msg ->
-                                            importStatus = msg
-                                        }
-                                    } else {
-                                        importStatus = "No netauth-service.json found in Downloads."
-                                    }
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(8.dp),
-                                colors = ButtonDefaults.outlinedButtonColors()
-                            ) {
-                                Icon(Icons.Rounded.Upload, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Import netauth-service.json")
-                            }
-
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-
-                            Text("Server Maintenance (Обслуживание сервера)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.error)
-
-                            Button(
-                                onClick = {
-                                    viewModel.clearRemoteDatabase { success, msg ->
-                                        importStatus = msg
-                                        if (success) {
-                                            android.widget.Toast.makeText(context, "Server Partition Wiped & Logged Out!", android.widget.Toast.LENGTH_LONG).show()
-                                        }
-                                    }
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(8.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                            ) {
-                                Icon(Icons.Rounded.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Wipe Active Server Partition (Стереть активную БД)", fontSize = 11.sp)
-                            }
-                        }
-                        2 -> {
-                            Text("Hardware Ban Control (Бан по железу)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                            Text("Fully blacklist network identifiers (IP and MAC) to block specific hardware from registering or logging in.", style = MaterialTheme.typography.bodySmall)
-
-                            OutlinedTextField(
-                                value = manualBanInput,
-                                onValueChange = { manualBanInput = it },
-                                label = { Text("IP or MAC Address") },
-                                placeholder = { Text("e.g. 192.168.49.50") },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Button(
-                                    onClick = {
-                                        if (manualBanInput.isNotBlank()) {
-                                            viewModel.banHardware(manualBanInput.trim(), "IP")
-                                            manualBanInput = ""
-                                            android.widget.Toast.makeText(context, "Banned IP Address", android.widget.Toast.LENGTH_SHORT).show()
-                                        }
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(8.dp)
-                                ) {
-                                    Text("Ban IP", fontSize = 11.sp)
-                                }
-
-                                Button(
-                                    onClick = {
-                                        if (manualBanInput.isNotBlank()) {
-                                            viewModel.banHardware(manualBanInput.trim(), "MAC")
-                                            manualBanInput = ""
-                                            android.widget.Toast.makeText(context, "Banned MAC Address", android.widget.Toast.LENGTH_SHORT).show()
-                                        }
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(8.dp)
-                                ) {
-                                    Text("Ban MAC", fontSize = 11.sp)
-                                }
-                            }
-
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-
-                            val bans by viewModel.allBannedHardware.collectAsStateWithLifecycle(initialValue = emptyList())
-                            Text("Active Hardware Bans (${bans.size}):", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-
-                            if (bans.isEmpty()) {
-                                Text("No hardware bans registered.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
-                            } else {
-                                bans.forEach { ban ->
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.15f))
-                                            .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
-                                            .padding(8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(ban.hardwareValue, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.error)
-                                            Text("Type: ${ban.banType}", style = MaterialTheme.typography.labelSmall)
-                                        }
-                                        IconButton(onClick = { viewModel.unbanHardware(ban.hardwareValue) }) {
-                                            Icon(Icons.Rounded.Delete, contentDescription = "Unban", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    viewModel.setActiveDatabase(dbInput)
-                    onDismiss()
-                }
-            ) {
-                Text("Save & Close")
-            }
-        }
-    )
-}
-
-@Composable
-fun GoogleCard(
-    modifier: Modifier = Modifier,
-    content: @Composable ColumnScope.() -> Unit
-) {
+fun GoogleCard(content: @Composable ColumnScope.() -> Unit) {
     Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .widthIn(max = 480.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
-        ),
-        shape = RoundedCornerShape(24.dp),
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(16.dp),
         border = CardDefaults.outlinedCardBorder(),
         content = content
     )
 }
 
-fun copyToClipboard(context: android.content.Context, text: String, label: String = "Email") {
-    val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-    val clip = android.content.ClipData.newPlainText(label, text)
-    clipboard.setPrimaryClip(clip)
-    android.widget.Toast.makeText(context, "Copied: $text", android.widget.Toast.LENGTH_SHORT).show()
+@Composable
+fun LanguageSwitcher(viewModel: AccountViewModel) {
+    val language by viewModel.language.collectAsStateWithLifecycle()
+    TextButton(onClick = { viewModel.setLanguage(if (language == "ru") "en" else "ru") }) {
+        Text(if (language == "ru") "EN" else "RU")
+    }
 }
 
-@Composable
-fun LanguageSwitcher(viewModel: AccountViewModel, modifier: Modifier = Modifier) {
-    val lang by viewModel.language.collectAsStateWithLifecycle()
-    var expanded by remember { mutableStateOf(false) }
-
-    val languages = listOf("en" to "English", "uk" to "Українська", "ru" to "Русский")
-
-    Box(modifier = modifier) {
-        OutlinedButton(
-            onClick = { expanded = true },
-            modifier = Modifier.testTag("lang_selector_button"),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Icon(Icons.Rounded.Language, contentDescription = null, modifier = Modifier.size(16.dp))
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = languages.find { it.first == lang }?.second ?: "English",
-                style = MaterialTheme.typography.bodyMedium
-            )
-            Spacer(modifier = Modifier.width(4.dp))
-            Icon(Icons.Rounded.ArrowDropDown, contentDescription = null, modifier = Modifier.size(16.dp))
-        }
-
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false }
-        ) {
-            languages.forEach { (code, name) ->
-                DropdownMenuItem(
-                    text = { Text(name) },
-                    onClick = {
-                        viewModel.setLanguage(code)
-                        expanded = false
-                    }
-                )
-            }
-        }
-    }
+fun copyToClipboard(context: Context, value: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+    clipboard?.setPrimaryClip(ClipData.newPlainText("OrvexaAuth", value))
 }
 
 // 1. Account Chooser Screen (Clean, Client-Only Login Selection)
@@ -648,21 +149,12 @@ fun AccountChooserScreen(
     onNavigate: (Screen) -> Unit
 ) {
     val users by viewModel.allUsers.collectAsStateWithLifecycle()
-    val discoveryState by viewModel.discoveryState.collectAsStateWithLifecycle()
-    val serverUrl by viewModel.serverUrl.collectAsStateWithLifecycle()
     val lang by viewModel.language.collectAsStateWithLifecycle()
-    val isScanningServers by viewModel.isScanningServers.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
-    LaunchedEffect(Unit) {
-        viewModel.scanForAllNearbyServers()
-    }
 
     // Action Dialog States for Selected Account
     var selectedActionUser by remember { mutableStateOf<User?>(null) }
-    var showSettings by remember { mutableStateOf(false) }
-    var showAddServerDialog by remember { mutableStateOf(false) }
-    var newServerUrlInput by remember { mutableStateOf("") }
 
     Scaffold(
         topBar = {
@@ -703,247 +195,12 @@ fun AccountChooserScreen(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Auto-Discovery Banner
-                AnimatedVisibility(
-                    visible = true,
-                    enter = fadeIn() + expandVertically(),
-                    exit = fadeOut() + shrinkVertically()
-                ) {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 16.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = when (discoveryState) {
-                                "searching" -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)
-                                "found" -> Color(0xFFE8F5E9)
-                                else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                            }
-                        ),
-                        shape = RoundedCornerShape(16.dp),
-                        border = androidx.compose.foundation.BorderStroke(
-                            width = 1.dp,
-                            color = when (discoveryState) {
-                                "searching" -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.3f)
-                                "found" -> Color(0xFF81C784)
-                                else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f)
-                            }
-                        )
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            when (discoveryState) {
-                                "searching" -> {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(20.dp),
-                                        strokeWidth = 2.dp,
-                                        color = MaterialTheme.colorScheme.secondary
-                                    )
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = viewModel.t("auto_discovering"),
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.onSecondaryContainer
-                                        )
-                                        Text(
-                                            text = viewModel.t("scanning_wifi"),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
-                                        )
-                                    }
-                                }
-                                "found" -> {
-                                    Icon(
-                                        imageVector = Icons.Rounded.CloudDone,
-                                        contentDescription = null,
-                                        tint = Color(0xFF2E7D32),
-                                        modifier = Modifier.size(24.dp)
-                                    )
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = viewModel.t("connected_local_cloud"),
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = Color(0xFF1B5E20)
-                                        )
-                                        Text(
-                                            text = serverUrl,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = Color(0xFF2E7D32)
-                                        )
-                                    }
-                                }
-                                else -> {
-                                    Icon(
-                                        imageVector = Icons.Rounded.CloudOff,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.size(24.dp)
-                                    )
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = viewModel.t("db_disconnected"),
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.error
-                                        )
-                                        Text(
-                                            text = viewModel.t("db_disconnected_desc"),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.error.copy(alpha = 0.8f)
-                                        )
-                                    }
-                                    IconButton(
-                                        onClick = { viewModel.startAutoDiscovery() },
-                                        modifier = Modifier.size(32.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.Refresh,
-                                            contentDescription = "Scan network",
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Saved/Known Servers List
-                val savedServers by viewModel.savedServers.collectAsStateWithLifecycle()
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 16.dp),
-                    horizontalAlignment = Alignment.Start
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = if (lang == "ru") "Серверы / Подключения:" else "Saved Connections:",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(
-                                onClick = {
-                                    viewModel.scanForAllNearbyServers { count ->
-                                        val msg = if (lang == "ru") {
-                                            "Найдено серверов: $count"
-                                        } else {
-                                            "Found $count servers"
-                                        }
-                                        android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                                enabled = !isScanningServers,
-                                modifier = Modifier.size(24.dp)
-                            ) {
-                                if (isScanningServers) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(16.dp),
-                                        strokeWidth = 2.dp,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                } else {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Search,
-                                        contentDescription = "Search Nearby Servers",
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            IconButton(
-                                onClick = { showAddServerDialog = true },
-                                modifier = Modifier.size(24.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Add,
-                                    contentDescription = "Add Server",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        savedServers.forEach { url ->
-                            val isActive = url == serverUrl
-                            val cleanUrl = url.removePrefix("http://").removePrefix("https://").removeSuffix("/")
-                            FilterChip(
-                                selected = isActive,
-                                onClick = {
-                                    viewModel.setServerUrl(url)
-                                },
-                                label = { Text(cleanUrl, fontSize = 11.sp, maxLines = 1) },
-                                trailingIcon = if (!isActive && url != com.example.data.NetAuthClientManager.DEFAULT_SERVER_URL) {
-                                    {
-                                        IconButton(
-                                            onClick = { viewModel.removeSavedServer(url) },
-                                            modifier = Modifier.size(16.dp)
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Rounded.Close,
-                                                contentDescription = "Delete",
-                                                modifier = Modifier.size(10.dp)
-                                            )
-                                        }
-                                    }
-                                } else null
-                            )
-                        }
-                    }
-                }
-
                 GoogleCard {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(20.dp)
                     ) {
-                        if (discoveryState != "found") {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f))
-                                    .padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.CloudOff,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Text(
-                                    text = viewModel.t("server_offline_desc"),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onErrorContainer
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(12.dp))
-                        }
-
                         if (users.isEmpty()) {
                             Box(
                                 modifier = Modifier
@@ -960,7 +217,7 @@ fun AccountChooserScreen(
                                     )
                                     Spacer(modifier = Modifier.height(12.dp))
                                     Text(
-                                        text = if (discoveryState == "found") viewModel.t("no_accounts_server") else viewModel.t("no_cached_accounts"),
+                                        text = viewModel.t("no_accounts_server"),
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -992,14 +249,14 @@ fun AccountChooserScreen(
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(12.dp))
                                         .combinedClickable(
-                                            enabled = discoveryState == "found",
+                                            enabled = true,
                                             onLongClick = { selectedActionUser = user },
                                             onClick = {
                                                 viewModel.selectLoginUser(user)
                                                 onNavigate(Screen.SignIn)
                                             }
                                         )
-                                        .alpha(if (discoveryState == "found") 1f else 0.5f)
+                                        .alpha(1f)
                                         .padding(12.dp)
                                         .testTag("account_item_${user.email}"),
                                     verticalAlignment = Alignment.CenterVertically
@@ -1040,18 +297,18 @@ fun AccountChooserScreen(
                                             IconButton(
                                                 onClick = { copyToClipboard(context, user.email) },
                                                 modifier = Modifier.size(18.dp),
-                                                enabled = discoveryState == "found"
+                                                enabled = true
                                             ) {
                                                 Icon(
                                                     imageVector = Icons.Rounded.ContentCopy,
                                                     contentDescription = "Copy Email",
-                                                    tint = MaterialTheme.colorScheme.primary.copy(alpha = if (discoveryState == "found") 0.7f else 0.3f),
+                                                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
                                                     modifier = Modifier.size(12.dp)
                                                 )
                                             }
                                         }
                                     }
-                                    
+
                                     // Options menu button
                                     IconButton(
                                         onClick = { selectedActionUser = user },
@@ -1070,90 +327,48 @@ fun AccountChooserScreen(
 
                         Spacer(modifier = Modifier.height(16.dp))
 
-                        Button(
-                            onClick = {
-                                viewModel.setLoginEmail("")
-                                viewModel.setLoginPassword("")
-                                onNavigate(Screen.SignIn)
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("use_another_account_button"),
-                            colors = ButtonDefaults.outlinedButtonColors(),
-                            enabled = true
-                        ) {
-                            Icon(Icons.Rounded.Add, contentDescription = null)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(viewModel.t("signin"))
-                        }
+                        if (true) {
+                            Button(
+                                onClick = {
+                                    viewModel.setLoginEmail("")
+                                    viewModel.setLoginPassword("")
+                                    onNavigate(Screen.SignIn)
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("use_another_account_button"),
+                                colors = ButtonDefaults.outlinedButtonColors(),
+                                enabled = true
+                            ) {
+                                Icon(Icons.Rounded.Add, contentDescription = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(viewModel.t("signin"))
+                            }
 
-                        Spacer(modifier = Modifier.height(8.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
 
-                        val isLimitReached = users.size >= 3
-                        Button(
-                            onClick = { onNavigate(Screen.RegisterName) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("create_account_button"),
-                            enabled = !isLimitReached
-                        ) {
-                            Text(if (isLimitReached) viewModel.t("register_limit_btn") ?: "Register (Max 3 reached)" else viewModel.t("register"))
+                            Button(
+                                onClick = { onNavigate(Screen.RegisterName) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("create_account_button"),
+                                enabled = true
+                            ) {
+                                Text(viewModel.t("register") ?: "Create account")
+                            }
+                        } else {
+                            Text(
+                                text = "OrvexaAuth Beta is unavailable. Check your internet connection and try again.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                textAlign = TextAlign.Center
+                            )
                         }
                     }
                 }
             }
         }
-    }
-
-    if (showSettings) {
-        ConnectionSettingsDialog(
-            viewModel = viewModel,
-            onDismiss = { showSettings = false }
-        )
-    }
-
-    if (showAddServerDialog) {
-        AlertDialog(
-            onDismissRequest = { showAddServerDialog = false },
-            title = { Text(if (lang == "ru") "Добавить сервер" else "Add Server Connection") },
-            text = {
-                OutlinedTextField(
-                    value = newServerUrlInput,
-                    onValueChange = { newServerUrlInput = it },
-                    label = { Text("Server URL / IP") },
-                    placeholder = { Text("http://192.168.1.100:8080") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp)
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        if (newServerUrlInput.isNotBlank()) {
-                            var formatted = newServerUrlInput.trim()
-                            if (!formatted.startsWith("http://") && !formatted.startsWith("https://")) {
-                                formatted = "http://$formatted"
-                            }
-                            if (!formatted.endsWith("/")) {
-                                formatted = "$formatted/"
-                            }
-                            viewModel.addSavedServer(formatted)
-                            viewModel.setServerUrl(formatted)
-                            showAddServerDialog = false
-                            newServerUrlInput = ""
-                        }
-                    }
-                ) {
-                    Text(if (lang == "ru") "Добавить" else "Add")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAddServerDialog = false }) {
-                    Text(if (lang == "ru") "Отмена" else "Cancel")
-                }
-            }
-        )
     }
 
     // Action Menu Dialog for selected user - Only "Delete Cached Profile"
@@ -1200,12 +415,12 @@ fun AccountChooserScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    
+
                     Button(
                         onClick = {
                             selectedActionUser = null
                             viewModel.removeLocalAccountCache(user)
-                            android.widget.Toast.makeText(context, "Removed profile and cleaned local database cache.", android.widget.Toast.LENGTH_LONG).show()
+                            android.widget.Toast.makeText(context, "Removed profile and cleared local session cache.", android.widget.Toast.LENGTH_LONG).show()
                         },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(8.dp),
@@ -1239,11 +454,9 @@ fun SignInScreen(
     val lang by viewModel.language.collectAsStateWithLifecycle()
     val requireKeyProtect by viewModel.requireKeyProtect.collectAsStateWithLifecycle()
     val keyProtect by viewModel.loginKeyProtect.collectAsStateWithLifecycle()
-    val discoveryState by viewModel.discoveryState.collectAsStateWithLifecycle()
 
     var passwordVisible by remember { mutableStateOf(false) }
     var showResetDialog by remember { mutableStateOf(false) }
-    var showSettings by remember { mutableStateOf(false) }
 
     // Dialog state
     var resetStep by remember { mutableIntStateOf(1) } // 1: input phone, 2: input code, 3: input new pass
@@ -1439,7 +652,7 @@ fun SignInScreen(
                                     Spacer(modifier = Modifier.width(12.dp))
                                     Column {
                                         Text("Simulated SMS Notification", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onTertiaryContainer)
-                                        Text("NetAuth Code: ${generatedSmsCode ?: ""}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onTertiaryContainer)
+                                        Text("OrvexaAuth Beta Code: ${generatedSmsCode ?: ""}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onTertiaryContainer)
                                     }
                                 }
                             }
@@ -1808,137 +1021,10 @@ fun RegisterBirthGenderScreen(
                     Button(
                         onClick = {
                             if (viewModel.validateBirthInfo()) {
-                                onNavigate(Screen.RegisterEmail)
-                            }
-                        },
-                        modifier = Modifier.testTag("reg_birth_next_button")
-                    ) {
-                        Text(viewModel.t("next"))
-                    }
-                }
-            }
-        }
-    }
-}
-
-// 5. Register Email Screen
-@Composable
-fun RegisterEmailScreen(
-    viewModel: AccountViewModel,
-    onNavigate: (Screen) -> Unit,
-    onBack: () -> Unit
-) {
-    val suggestions by viewModel.emailSuggestions.collectAsStateWithLifecycle()
-    val selectedOption by viewModel.regEmailOption.collectAsStateWithLifecycle()
-    val customEmail by viewModel.regCustomEmail.collectAsStateWithLifecycle()
-    val error by viewModel.regError.collectAsStateWithLifecycle()
-
-    val emailSuffix by viewModel.emailSuffix.collectAsStateWithLifecycle()
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        GoogleHeader(
-            title = viewModel.t("choose_address_title"),
-            subtitle = viewModel.t("choose_address_desc")
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-        LinearProgressIndicator(progress = { 0.5f }, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)))
-        Spacer(modifier = Modifier.height(20.dp))
-
-        GoogleCard {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp)
-            ) {
-                // List of suggested emails
-                suggestions.forEach { option ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable { viewModel.setRegEmailOption(option) }
-                            .padding(vertical = 12.dp, horizontal = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = (selectedOption == option),
-                            onClick = { viewModel.setRegEmailOption(option) }
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(option, style = MaterialTheme.typography.bodyLarge)
-                    }
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                }
-
-                // Custom email option
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable { viewModel.setRegEmailOption("custom") }
-                        .padding(vertical = 12.dp, horizontal = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    RadioButton(
-                        selected = (selectedOption == "custom"),
-                        onClick = { viewModel.setRegEmailOption("custom") }
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(viewModel.t("custom_email_desc"), style = MaterialTheme.typography.bodyLarge)
-                }
-
-                AnimatedVisibility(visible = selectedOption == "custom") {
-                    Column(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                        OutlinedTextField(
-                            value = customEmail,
-                            onValueChange = { viewModel.setRegCustomEmail(it) },
-                            label = { Text(viewModel.t("custom_email_label")) },
-                            placeholder = { Text("username$emailSuffix") },
-                            leadingIcon = { Icon(Icons.Rounded.AlternateEmail, contentDescription = null) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("reg_custom_email_input"),
-                            singleLine = true,
-                            shape = RoundedCornerShape(12.dp)
-                        )
-                    }
-                }
-
-                if (error != null) {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = error!!,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextButton(onClick = onBack) {
-                        Text(viewModel.t("back"))
-                    }
-
-                    Button(
-                        onClick = {
-                            if (viewModel.validateEmailStep()) {
                                 onNavigate(Screen.RegisterPassword)
                             }
                         },
-                        modifier = Modifier.testTag("reg_email_next_button")
+                        modifier = Modifier.testTag("reg_birth_next_button")
                     ) {
                         Text(viewModel.t("next"))
                     }
@@ -2043,118 +1129,12 @@ fun RegisterPasswordScreen(
                     Button(
                         onClick = {
                             if (viewModel.validatePasswordStep()) {
-                                onNavigate(Screen.RegisterContact)
+                                onNavigate(Screen.RegisterTerms)
                             }
                         },
                         modifier = Modifier.testTag("reg_password_next_button")
                     ) {
                         Text(viewModel.t("next"))
-                    }
-                }
-            }
-        }
-    }
-}
-
-// 7. Register Contact Info Screen (Phone & Recovery Email)
-@Composable
-fun RegisterContactScreen(
-    viewModel: AccountViewModel,
-    onNavigate: (Screen) -> Unit,
-    onBack: () -> Unit
-) {
-    val phone by viewModel.regPhoneNumber.collectAsStateWithLifecycle()
-    val recovery by viewModel.regRecoveryEmail.collectAsStateWithLifecycle()
-    val error by viewModel.regError.collectAsStateWithLifecycle()
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        GoogleHeader(
-            title = viewModel.t("security_recommendations"),
-            subtitle = ""
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-        LinearProgressIndicator(progress = { 0.8f }, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)))
-        Spacer(modifier = Modifier.height(20.dp))
-
-        GoogleCard {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp)
-            ) {
-                OutlinedTextField(
-                    value = phone,
-                    onValueChange = { viewModel.setRegContactInfo(it, recovery) },
-                    label = { Text(viewModel.t("phone_optional")) },
-                    leadingIcon = { Icon(Icons.Rounded.Phone, contentDescription = null) },
-                    placeholder = { Text("+1 555-0100") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("reg_phone_input"),
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp)
-                )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                OutlinedTextField(
-                    value = recovery,
-                    onValueChange = { viewModel.setRegContactInfo(phone, it) },
-                    label = { Text(viewModel.t("recovery_email_optional")) },
-                    leadingIcon = { Icon(Icons.Rounded.Email, contentDescription = null) },
-                    placeholder = { Text("recovery@example.com") },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("reg_recovery_email_input"),
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp)
-                )
-
-                if (error != null) {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = error!!,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextButton(onClick = { onNavigate(Screen.RegisterTerms) }) {
-                        Text(viewModel.t("skip"))
-                    }
-
-                    Row {
-                        TextButton(onClick = onBack) {
-                            Text(viewModel.t("back"))
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Button(
-                            onClick = {
-                                if (recovery.isNotEmpty() && !android.util.Patterns.EMAIL_ADDRESS.matcher(recovery).matches()) {
-                                    viewModel.setRegContactInfo(phone, recovery)
-                                }
-                                onNavigate(Screen.RegisterTerms)
-                            },
-                            modifier = Modifier.testTag("reg_contact_next_button")
-                        ) {
-                            Text(viewModel.t("next"))
-                        }
                     }
                 }
             }
@@ -2171,7 +1151,6 @@ fun RegisterTermsScreen(
     onRegisterSuccess: () -> Unit
 ) {
     val error by viewModel.regError.collectAsStateWithLifecycle()
-    val discoveryState by viewModel.discoveryState.collectAsStateWithLifecycle()
 
     Column(
         modifier = Modifier
@@ -2279,6 +1258,11 @@ fun DashboardScreen(
     val user by viewModel.loggedInUser.collectAsStateWithLifecycle()
     val lang by viewModel.language.collectAsStateWithLifecycle()
     var activeTab by remember { mutableIntStateOf(0) }
+    var availableUpdate by remember { mutableStateOf<UpdateManager.ReleaseUpdate?>(null) }
+
+    LaunchedEffect(Unit) {
+        availableUpdate = UpdateManager.check()
+    }
 
     LaunchedEffect(user) {
         if (user == null) {
@@ -2321,13 +1305,21 @@ fun DashboardScreen(
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "NetAuth Account",
+                            text = "OrvexaAuth Beta Account",
                             fontWeight = FontWeight.SemiBold,
                             style = MaterialTheme.typography.titleMedium
                         )
                     }
                 },
                 actions = {
+                    availableUpdate?.let { update ->
+                        IconButton(
+                            onClick = { UpdateManager.downloadAndOpenInstaller(currentContext, update) },
+                            modifier = Modifier.testTag("dashboard_update_button")
+                        ) {
+                            Icon(Icons.Rounded.SystemUpdate, contentDescription = "Update OrvexaAuth")
+                        }
+                    }
                     IconButton(
                         onClick = { viewModel.logout(); onSignOut() },
                         modifier = Modifier.testTag("dashboard_signout_button")
@@ -2400,11 +1392,13 @@ fun DashboardHomeTab(
     onNavigateToTab: (Int) -> Unit
 ) {
     val files by viewModel.userFiles.collectAsStateWithLifecycle()
+
     var showStorageDialog by remember { mutableStateOf(false) }
 
     val totalSize = files.sumOf { it.size }
     val totalSizeStr = formatSize(totalSize)
-    val quotaMb = if (user.dataQuotaMb > 0) user.dataQuotaMb else 512
+    val baseQuota = if (user.dataQuotaMb > 0) user.dataQuotaMb else 512
+    val quotaMb = baseQuota
     val maxBytes = quotaMb * 1024 * 1024L
     val usePct = (totalSize.toFloat() / maxBytes.toFloat()).coerceIn(0f, 1f)
     val pctStr = String.format("%.4f%%", usePct * 100)
@@ -2592,10 +1586,11 @@ fun DashboardHomeTab(
                 }
             }
         }
-        
+
         if (showStorageDialog) {
             ServerStorageManagerDialog(viewModel = viewModel, onDismiss = { showStorageDialog = false })
         }
+
     }
 }
 
@@ -2610,8 +1605,6 @@ fun DashboardPersonalInfoTab(
     var draftLastName by remember(user) { mutableStateOf(user.lastName) }
     var draftBirthDate by remember(user) { mutableStateOf(user.birthDate) }
     var draftGender by remember(user) { mutableStateOf(user.gender) }
-    var draftPhone by remember(user) { mutableStateOf(user.phoneNumber) }
-    var draftRecovery by remember(user) { mutableStateOf(user.recoveryEmail) }
 
     var updateError by remember { mutableStateOf<String?>(null) }
     var updateSuccess by remember { mutableStateOf(false) }
@@ -2642,8 +1635,6 @@ fun DashboardPersonalInfoTab(
                             lastName = draftLastName,
                             birthDate = draftBirthDate,
                             gender = draftGender,
-                            phoneNumber = draftPhone,
-                            recoveryEmail = draftRecovery,
                             onSuccess = {
                                 editMode = false
                                 updateSuccess = true
@@ -2671,7 +1662,7 @@ fun DashboardPersonalInfoTab(
         }
 
         Text(
-            text = "Info about you and your preferences in NetAuth Client services",
+            text = "Info about you and your preferences in OrvexaAuth Beta services",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(bottom = 16.dp)
@@ -2763,44 +1754,6 @@ fun DashboardPersonalInfoTab(
         GoogleCard {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = "Contact info",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(bottom = 12.dp)
-                )
-
-                InfoRow(label = "EMAIL", value = user.email)
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                if (editMode) {
-                    OutlinedTextField(
-                        value = draftPhone,
-                        onValueChange = { draftPhone = it },
-                        label = { Text("Phone number") },
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        shape = RoundedCornerShape(12.dp)
-                    )
-                    OutlinedTextField(
-                        value = draftRecovery,
-                        onValueChange = { draftRecovery = it },
-                        label = { Text("Recovery email") },
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        shape = RoundedCornerShape(12.dp)
-                    )
-                } else {
-                    InfoRow(label = "PHONE", value = user.phoneNumber.ifEmpty { "Not specified" })
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    InfoRow(label = "RECOVERY EMAIL", value = user.recoveryEmail.ifEmpty { "Not specified" })
-                }
-            }
-        }
-        
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        GoogleCard {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
                     text = "Device Access Security",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
@@ -2815,7 +1768,7 @@ fun DashboardPersonalInfoTab(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
-                
+
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                 InfoRow(label = "MAC ADDRESS", value = user.macAddress.ifEmpty { "Unknown" })
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
@@ -2906,7 +1859,7 @@ fun DashboardSecurityTab(
         GoogleCard {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = "Signing in to NetAuth",
+                    text = "Signing in to OrvexaAuth Beta",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary,
@@ -2925,7 +1878,7 @@ fun DashboardSecurityTab(
                     Spacer(modifier = Modifier.width(16.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Password", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
-                        Text("Change local database password safely", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Change your OrvexaAuth Beta password safely", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Icon(Icons.Rounded.ChevronRight, contentDescription = null)
                 }
@@ -3088,7 +2041,7 @@ fun DashboardSecurityTab(
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Text("Set a 4-digit numeric passcode to protect your application access.")
-                        
+
                         OutlinedTextField(
                             value = setupPasscodeInput,
                             onValueChange = { if (it.all { char -> char.isDigit() } && it.length <= 4) setupPasscodeInput = it },
@@ -3144,7 +2097,7 @@ fun DashboardSecurityTab(
             AlertDialog(
                 onDismissRequest = { showDeleteDialog = false },
                 title = { Text("Delete Account permanently?") },
-                text = { Text("Are you sure you want to permanently delete your account? This will erase your profile, files, and chat messages from both the server database and this device local database. This action is irreversible.") },
+                text = { Text("Are you sure you want to permanently delete your account? This will erase your profile, files, and chat messages from the public OrvexaAuth service. This action is irreversible.") },
                 confirmButton = {
                     Button(
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
@@ -3529,7 +2482,7 @@ fun DashboardMessagesTab(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("Enter the registered NetAuth email address of the person you want to message:")
+                    Text("Enter the registered OrvexaAuth email address of the person you want to message:")
                     OutlinedTextField(
                         value = newChatEmail,
                         onValueChange = { newChatEmail = it },
@@ -3716,11 +2669,11 @@ fun ServerStorageManagerDialog(
 ) {
     val files by viewModel.userFiles.collectAsStateWithLifecycle()
     val isLoading by viewModel.isStorageLoading.collectAsStateWithLifecycle()
-    
+
     var showUploadDialog by remember { mutableStateOf(false) }
     var uploadName by remember { mutableStateOf("") }
     var uploadContent by remember { mutableStateOf("") }
-    
+
     var selectedFileContent by remember { mutableStateOf<String?>(null) }
     var selectedFileName by remember { mutableStateOf<String?>(null) }
     var isDownloading by remember { mutableStateOf(false) }
@@ -3803,7 +2756,6 @@ fun ServerStorageManagerDialog(
                                                 }
                                                 val req = okhttp3.Request.Builder()
                                                     .url(requestUrl)
-                                                    .addHeader("X-Database-Name", viewModel.activeDatabase.value)
                                                     .build()
                                                 withContext(Dispatchers.IO) {
                                                     client.newCall(req).execute().use { response ->

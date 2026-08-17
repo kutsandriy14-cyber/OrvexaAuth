@@ -1,4 +1,4 @@
-# 🎮 NetAuth Client & Custom Minecraft Launcher Connection Guide
+# 🎮 OrvexaAuth Beta & Custom Minecraft Launcher Connection Guide
 # 🌐 Промт Авто-Подключения и Интеграции Лаунчера Майнкрафт (UDP/LAN Поиск)
 
 This guide contains the exact technical specification for developers or AI systems to implement automatic server discovery, local network discovery, and API integration in any custom **Minecraft Launcher**, application, or game website.

@@ -21,7 +21,7 @@ class GreetingScreenshotTest {
 
   @Test
   fun greeting_screenshot() {
-    composeTestRule.setContent { MyApplicationTheme { com.example.ui.GoogleHeader(title = "NetAuth Client", subtitle = "Choose an account") } }
+    composeTestRule.setContent { MyApplicationTheme { com.example.ui.GoogleHeader(title = "OrvexaAuth Beta", subtitle = "Choose an account") } }
 
     composeTestRule.onRoot().captureRoboImage(filePath = "src/test/screenshots/greeting.png")
   }

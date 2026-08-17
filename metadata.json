@@ -1,6 +1,6 @@
 {
-  "name": "NetAuth Client",
-  "description": "A secure client application to connect and authenticate with your NetAuth local cloud database server.",
+  "name": "OrvexaAuth Beta",
+  "description": "Cloudflare-only Android client for OrvexaAuth account security and social features.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }
