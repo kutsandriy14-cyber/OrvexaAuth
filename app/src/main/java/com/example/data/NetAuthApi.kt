@@ -58,10 +58,6 @@ data class NetworkUserResponse(
     val gender: String? = null,
     @com.squareup.moshi.Json(name = "avatarColor") val avatarColorCamel: Int? = null,
     @com.squareup.moshi.Json(name = "avatar_color") val avatarColorSnake: Int? = null,
-    @com.squareup.moshi.Json(name = "phoneNumber") val phoneNumberCamel: String? = null,
-    @com.squareup.moshi.Json(name = "phone_number") val phoneNumberSnake: String? = null,
-    @com.squareup.moshi.Json(name = "recoveryEmail") val recoveryEmailCamel: String? = null,
-    @com.squareup.moshi.Json(name = "recovery_email") val recoveryEmailSnake: String? = null,
     @com.squareup.moshi.Json(name = "ipAddress") val ipAddressCamel: String? = null,
     @com.squareup.moshi.Json(name = "ip_address") val ipAddressSnake: String? = null,
     @com.squareup.moshi.Json(name = "macAddress") val macAddressCamel: String? = null,
@@ -79,8 +75,6 @@ data class NetworkUserResponse(
         val bDate = birthDateCamel ?: birthDateSnake ?: ""
         val gdr = gender ?: "Rather not say"
         val avColor = avatarColorCamel ?: avatarColorSnake ?: -12543232
-        val pNum = phoneNumberCamel ?: phoneNumberSnake ?: ""
-        val rEmail = recoveryEmailCamel ?: recoveryEmailSnake ?: ""
         val ip = ipAddressCamel ?: ipAddressSnake ?: ""
         val mac = macAddressCamel ?: macAddressSnake ?: ""
         val kp = keyProtectCamel ?: keyProtectSnake ?: ""
@@ -96,8 +90,6 @@ data class NetworkUserResponse(
             birthDate = bDate,
             gender = gdr,
             avatarColor = avColor,
-            phoneNumber = pNum,
-            recoveryEmail = rEmail,
             ipAddress = ip,
             macAddress = mac,
             keyProtect = kp,
@@ -213,8 +205,6 @@ class NetAuthClientManager(private val context: Context) {
         // Beta 0.1.1 never persists custom endpoints or server lists.
         prefs.edit()
             .remove("server_url")
-            .remove("saved_servers")
-            .remove("email_suffix")
             .remove("active_database")
             .apply()
     }
@@ -288,8 +278,6 @@ class NetAuthClientManager(private val context: Context) {
             .putString("user_birth_date", user.birthDate)
             .putString("user_gender", user.gender)
             .putInt("user_avatar_color", user.avatarColor)
-            .putString("user_phone", user.phoneNumber)
-            .putString("user_recovery_email", user.recoveryEmail)
             .putString("user_ip", user.ipAddress)
             .putString("user_mac", user.macAddress)
             .putString("user_key_protect", user.keyProtect)
@@ -310,8 +298,6 @@ class NetAuthClientManager(private val context: Context) {
             birthDate = prefs.getString("user_birth_date", "") ?: "",
             gender = prefs.getString("user_gender", "") ?: "",
             avatarColor = prefs.getInt("user_avatar_color", 0),
-            phoneNumber = prefs.getString("user_phone", "") ?: "",
-            recoveryEmail = prefs.getString("user_recovery_email", "") ?: "",
             ipAddress = prefs.getString("user_ip", "") ?: "",
             macAddress = prefs.getString("user_mac", "") ?: "",
             keyProtect = prefs.getString("user_key_protect", "") ?: "",
@@ -330,8 +316,6 @@ class NetAuthClientManager(private val context: Context) {
             .remove("user_birth_date")
             .remove("user_gender")
             .remove("user_avatar_color")
-            .remove("user_phone")
-            .remove("user_recovery_email")
             .remove("user_ip")
             .remove("user_mac")
             .remove("user_key_protect")

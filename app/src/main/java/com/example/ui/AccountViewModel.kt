@@ -1,6 +1,7 @@
 package com.example.ui
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.*
@@ -23,6 +24,7 @@ import java.security.MessageDigest
 
 class AccountViewModel(application: Application) : AndroidViewModel(application) {
     private val clientManager = NetAuthClientManager(application)
+    private val credentialManager = CredentialManagerHelper(application)
     val userDao = UserDao(application)
     val messageDao = MessageDao(application)
     val allBannedHardware = userDao.getAllBannedHardware()
@@ -245,78 +247,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // Phone password reset states (Server-side helper)
-    private val _resetPhone = MutableStateFlow("")
-    val resetPhone: StateFlow<String> = _resetPhone.asStateFlow()
-
-    private val _resetGeneratedCode = MutableStateFlow("")
-    val resetGeneratedCode: StateFlow<String> = _resetGeneratedCode.asStateFlow()
-
-    private val _resetInputCode = MutableStateFlow("")
-    val resetInputCode: StateFlow<String> = _resetInputCode.asStateFlow()
-
-    private val _resetError = MutableStateFlow<String?>(null)
-    val resetError: StateFlow<String?> = _resetError.asStateFlow()
-
-    fun sendResetSmsCode(phone: String, onSent: (String) -> Unit) {
-        viewModelScope.launch {
-            val formattedPhone = phone.trim()
-            if (formattedPhone.isEmpty()) {
-                _resetError.value = "Enter phone number"
-                return@launch
-            }
-            // Check matching phone number across all users on server
-            val matchedUser = _allUsers.value.find { it.phoneNumber.trim() == formattedPhone }
-            if (matchedUser != null) {
-                val code = (100000..999999).random().toString()
-                _resetPhone.value = formattedPhone
-                _resetGeneratedCode.value = code
-                _resetInputCode.value = ""
-                _resetError.value = null
-                onSent(code)
-            } else {
-                _resetError.value = t("phone_not_found")
-            }
-        }
-    }
-
-    fun verifySmsCode(code: String): Boolean {
-        if (code.trim() == _resetGeneratedCode.value && code.trim().isNotEmpty()) {
-            _resetError.value = null
-            return true
-        } else {
-            _resetError.value = t("invalid_code")
-            return false
-        }
-    }
-
-    fun performPasswordReset(newPass: String, onSuccess: () -> Unit) {
-        val phone = _resetPhone.value
-        if (phone.isEmpty()) {
-            _resetError.value = "No active reset flow"
-            return
-        }
-        viewModelScope.launch {
-            val match = _allUsers.value.find { it.phoneNumber.trim() == phone }
-            if (match != null) {
-                try {
-                    val api = clientManager.getService()
-                    api.updatePassword(match.id, NetworkUpdatePasswordRequest(sha256(newPass)))
-                    _resetPhone.value = ""
-                    _resetGeneratedCode.value = ""
-                    _resetInputCode.value = ""
-                    _resetError.value = null
-                    refreshServerUsers()
-                    onSuccess()
-                } catch (e: Exception) {
-                    _resetError.value = "Reset failed: ${e.localizedMessage}"
-                }
-            } else {
-                _resetError.value = "Error locating matching user"
-            }
-        }
-    }
-
     // Login screen state
     private val _loginEmail = MutableStateFlow("")
     val loginEmail: StateFlow<String> = _loginEmail.asStateFlow()
@@ -363,12 +293,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
 
     private val _regConfirmPassword = MutableStateFlow("")
     val regConfirmPassword: StateFlow<String> = _regConfirmPassword.asStateFlow()
-
-    private val _regPhoneNumber = MutableStateFlow("")
-    val regPhoneNumber: StateFlow<String> = _regPhoneNumber.asStateFlow()
-
-    private val _regRecoveryEmail = MutableStateFlow("")
-    val regRecoveryEmail: StateFlow<String> = _regRecoveryEmail.asStateFlow()
 
     private val _regError = MutableStateFlow<String?>(null)
     val regError: StateFlow<String?> = _regError.asStateFlow()
@@ -441,6 +365,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
 
                 // OrvexaAuth Beta uses the public API as the only account backend.
                 _loggedInUser.value = remoteUser
+                saveCredentialInProvider(email, password)
                 _loginError.value = null
                 _requireKeyProtect.value = false
                 _loginKeyProtect.value = ""
@@ -454,6 +379,24 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 onSuccess()
             } catch (e: Exception) {
                 _loginError.value = "Server authentication error: ${e.localizedMessage ?: "Connection refused"}"
+            }
+        }
+    }
+
+    private fun saveCredentialInProvider(username: String, password: String) {
+        viewModelScope.launch {
+            // Failure is intentionally non-fatal: a provider may be unavailable or disabled.
+            credentialManager.savePassword(username, password)
+        }
+    }
+
+    fun useSavedCredential(context: Context, onLoaded: (String, String) -> Unit, onUnavailable: (String) -> Unit = {}) {
+        viewModelScope.launch {
+            val result = credentialManager.getPassword(context)
+            result.getOrNull()?.let { (username, password) ->
+                onLoaded(username, password)
+            } ?: result.exceptionOrNull()?.let { error ->
+                onUnavailable(error.localizedMessage ?: "No saved credential available")
             }
         }
     }
@@ -520,12 +463,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
     fun setRegPassword(pass: String, confirm: String) {
         _regPassword.value = pass
         _regConfirmPassword.value = confirm
-        _regError.value = null
-    }
-
-    fun setRegContactInfo(phone: String, recovery: String) {
-        _regPhoneNumber.value = phone
-        _regRecoveryEmail.value = recovery
         _regError.value = null
     }
 
@@ -642,6 +579,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
 
                 // Keep only the local session record; all account data remains server-authoritative.
                 _loggedInUser.value = localUser
+                saveCredentialInProvider(email, password)
                 _regError.value = null
                 resetRegDraft()
 
@@ -668,8 +606,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         _regCustomEmail.value = ""
         _regPassword.value = ""
         _regConfirmPassword.value = ""
-        _regPhoneNumber.value = ""
-        _regRecoveryEmail.value = ""
         _regError.value = null
     }
 
@@ -678,8 +614,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
         lastName: String,
         birthDate: String,
         gender: String,
-        phoneNumber: String = "",
-        recoveryEmail: String = "",
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
@@ -914,8 +848,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                     "birthDate" to user.birthDate,
                     "gender" to user.gender,
                     "avatarColor" to user.avatarColor,
-                    "phoneNumber" to user.phoneNumber,
-                    "recoveryEmail" to user.recoveryEmail,
                     "ipAddress" to user.ipAddress,
                     "macAddress" to user.macAddress,
                     "keyProtect" to user.keyProtect,
@@ -1035,8 +967,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                     val birthDate = profile["birthDate"] as? String ?: ""
                     val gender = profile["gender"] as? String ?: ""
                     val avatarColor = (profile["avatarColor"] as? Double)?.toInt() ?: (profile["avatarColor"] as? Int) ?: 0
-                    val phoneNumber = profile["phoneNumber"] as? String ?: ""
-                    val recoveryEmail = profile["recoveryEmail"] as? String ?: ""
                     val ipAddress = profile["ipAddress"] as? String ?: ""
                     val macAddress = profile["macAddress"] as? String ?: ""
                     val keyProtect = profile["keyProtect"] as? String ?: ""

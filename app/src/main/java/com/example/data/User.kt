@@ -9,8 +9,6 @@ data class User(
     val birthDate: String,
     val gender: String,
     val avatarColor: Int,
-    val phoneNumber: String = "",
-    val recoveryEmail: String = "",
     val ipAddress: String = "",
     val macAddress: String = "",
     val keyProtect: String = "",

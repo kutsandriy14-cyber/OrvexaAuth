@@ -456,18 +456,6 @@ fun SignInScreen(
     val keyProtect by viewModel.loginKeyProtect.collectAsStateWithLifecycle()
 
     var passwordVisible by remember { mutableStateOf(false) }
-    var showResetDialog by remember { mutableStateOf(false) }
-
-    // Dialog state
-    var resetStep by remember { mutableIntStateOf(1) } // 1: input phone, 2: input code, 3: input new pass
-    var inputPhone by remember { mutableStateOf("") }
-    var inputCode by remember { mutableStateOf("") }
-    var newPass by remember { mutableStateOf("") }
-    var confirmPass by remember { mutableStateOf("") }
-    var dialogError by remember { mutableStateOf<String?>(null) }
-    var dialogSuccess by remember { mutableStateOf<String?>(null) }
-
-    val generatedSmsCode by viewModel.resetGeneratedCode.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -542,20 +530,24 @@ fun SignInScreen(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    TextButton(
+                    OutlinedButton(
                         onClick = {
-                            inputPhone = ""
-                            inputCode = ""
-                            newPass = ""
-                            confirmPass = ""
-                            dialogError = null
-                            dialogSuccess = null
-                            resetStep = 1
-                            showResetDialog = true
+                            viewModel.useSavedCredential(
+                                context = context,
+                                onLoaded = { savedUsername, savedPassword ->
+                                    viewModel.setLoginEmail(savedUsername)
+                                    viewModel.setLoginPassword(savedPassword)
+                                },
+                                onUnavailable = { message ->
+                                    android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            )
                         },
-                        modifier = Modifier.align(Alignment.End)
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(viewModel.t("forgot_password"))
+                        Icon(Icons.Rounded.Key, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Use saved password")
                     }
 
                     if (error != null) {
@@ -603,149 +595,6 @@ fun SignInScreen(
             }
         }
 
-    }
-
-    // Reset Password Dialog
-    if (showResetDialog) {
-        AlertDialog(
-            onDismissRequest = { showResetDialog = false },
-            title = { Text(viewModel.t("reset_title")) },
-            text = {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    if (dialogError != null) {
-                        Text(dialogError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
-                    }
-                    if (dialogSuccess != null) {
-                        Text(dialogSuccess!!, color = Color(0xFF2E7D32), style = MaterialTheme.typography.bodyMedium)
-                    }
-
-                    when (resetStep) {
-                        1 -> {
-                            Text(viewModel.t("reset_enter_phone"), style = MaterialTheme.typography.bodyMedium)
-                            OutlinedTextField(
-                                value = inputPhone,
-                                onValueChange = { inputPhone = it },
-                                label = { Text(viewModel.t("phone_field")) },
-                                leadingIcon = { Icon(Icons.Rounded.Phone, contentDescription = null) },
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(12.dp),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone)
-                            )
-                        }
-                        2 -> {
-                            Text(viewModel.t("reset_enter_code"), style = MaterialTheme.typography.bodyMedium)
-
-                            // Visual SMS message box simulation
-                            Card(
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
-                                shape = RoundedCornerShape(12.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(Icons.Rounded.Sms, contentDescription = null, tint = MaterialTheme.colorScheme.onTertiaryContainer)
-                                    Spacer(modifier = Modifier.width(12.dp))
-                                    Column {
-                                        Text("Simulated SMS Notification", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onTertiaryContainer)
-                                        Text("OrvexaAuth Beta Code: ${generatedSmsCode ?: ""}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onTertiaryContainer)
-                                    }
-                                }
-                            }
-
-                            OutlinedTextField(
-                                value = inputCode,
-                                onValueChange = { inputCode = it },
-                                label = { Text(viewModel.t("code_field")) },
-                                leadingIcon = { Icon(Icons.Rounded.LockOpen, contentDescription = null) },
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(12.dp),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                            )
-                        }
-                        3 -> {
-                            Text(viewModel.t("reset_enter_new_pass"), style = MaterialTheme.typography.bodyMedium)
-                            OutlinedTextField(
-                                value = newPass,
-                                onValueChange = { newPass = it },
-                                label = { Text("New Password") },
-                                leadingIcon = { Icon(Icons.Rounded.Lock, contentDescription = null) },
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(12.dp),
-                                visualTransformation = PasswordVisualTransformation()
-                            )
-                            OutlinedTextField(
-                                value = confirmPass,
-                                onValueChange = { confirmPass = it },
-                                label = { Text("Confirm New Password") },
-                                leadingIcon = { Icon(Icons.Rounded.Lock, contentDescription = null) },
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(12.dp),
-                                visualTransformation = PasswordVisualTransformation()
-                            )
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        dialogError = null
-                        dialogSuccess = null
-                        when (resetStep) {
-                            1 -> {
-                                if (inputPhone.trim().isEmpty()) {
-                                    dialogError = "Please enter phone number"
-                                } else {
-                                    viewModel.sendResetSmsCode(inputPhone) { code ->
-                                        resetStep = 2
-                                        dialogSuccess = "Code sent via simulated SMS"
-                                    }
-                                }
-                            }
-                            2 -> {
-                                if (viewModel.verifySmsCode(inputCode)) {
-                                    resetStep = 3
-                                    dialogSuccess = "Code verified successfully"
-                                } else {
-                                    dialogError = "Incorrect 6-digit confirmation code"
-                                }
-                            }
-                            3 -> {
-                                if (newPass.length < 6) {
-                                    dialogError = "Password must be at least 6 characters"
-                                } else if (newPass != confirmPass) {
-                                    dialogError = "Passwords do not match"
-                                } else {
-                                    viewModel.performPasswordReset(newPass) {
-                                        showResetDialog = false
-                                        dialogSuccess = "Password reset successfully!"
-                                        android.widget.Toast.makeText(context, "Password changed. You can now login.", android.widget.Toast.LENGTH_LONG).show()
-                                    }
-                                }
-                            }
-                        }
-                    }
-                ) {
-                    Text(
-                        when (resetStep) {
-                            1 -> "Send Code"
-                            2 -> "Verify"
-                            else -> "Reset Password"
-                        }
-                    )
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showResetDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
     }
 }
 

@@ -5,14 +5,14 @@ import androidx.credentials.CredentialManager
 import androidx.credentials.CreatePasswordRequest
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.PasswordCredential
-import androidx.credentials.exceptions.GetCredentialException
 import androidx.credentials.exceptions.CreateCredentialException
+import androidx.credentials.exceptions.GetCredentialException
 import androidx.credentials.GetPasswordOption
 
 /**
- * Optional system credential integration. The actual provider may be Google Password Manager
- * or another Credential Manager provider configured by the user. The app never stores the
- * clear-text password in its own preferences or database.
+ * Optional system credential integration. The active provider may be Google Password Manager
+ * or another Credential Manager provider selected by the user. The app never writes the clear-text
+ * password to its own preferences, files, database, logs, or network payloads beyond the login call.
  */
 class CredentialManagerHelper(context: Context) {
     private val appContext = context.applicationContext
@@ -22,7 +22,7 @@ class CredentialManagerHelper(context: Context) {
         return try {
             manager.createCredential(
                 context = appContext,
-                request = CreatePasswordRequest(id = username, password = password)
+                request = CreatePasswordRequest(id = username.trim(), password = password)
             )
             Result.success(Unit)
         } catch (error: CreateCredentialException) {
@@ -32,10 +32,10 @@ class CredentialManagerHelper(context: Context) {
         }
     }
 
-    suspend fun getPassword(): Result<Pair<String, String>?> {
+    suspend fun getPassword(foregroundContext: Context): Result<Pair<String, String>?> {
         return try {
             val response = manager.getCredential(
-                context = appContext,
+                context = foregroundContext,
                 request = GetCredentialRequest(
                     credentialOptions = listOf(GetPasswordOption())
                 )
