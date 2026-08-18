@@ -17,12 +17,16 @@ const LAN_SESSION_TTL_SECONDS = 4 * 60 * 60; // 4 hours
 const LAN_TICKET_TTL_SECONDS = 5 * 60; // 5 minutes
 const ADMIN_SESSION_TTL_SECONDS = 15 * 60; // 15 minutes
 const ADMIN_REQUEST_TTL_SECONDS = 3 * 60; // replay-protection window
+const QR_ACCESS_REQUEST_TTL_SECONDS = 3 * 60; // signed generator request replay-protection window
+const QR_ACCESS_MIN_TTL_MS = 5 * 60 * 1000;
+const QR_ACCESS_MAX_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+const ADMIN_SCOPES = new Set(["accounts.read", "accounts.restrict", "accounts.delete", "chat.moderate", "exports.write", "audit.read"]);
 
 // CORS headers helper
 function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, X-Database-Name, X-App-Name, Authorization, X-Admin-Device-Id, X-Admin-Request-Id, X-Admin-Request-Time",
+    "Access-Control-Allow-Headers": "Content-Type, X-Database-Name, X-App-Name, Authorization, X-Admin-Device-Id, X-Admin-Request-Id, X-Admin-Request-Time, X-QR-Enrollment-Secret, X-QR-Issuer-Id, X-QR-Request-Id, X-QR-Request-Time, X-QR-Signature",
     "Access-Control-Allow-Methods": "GET, PUT, POST, DELETE, OPTIONS",
     "Access-Control-Max-Age": "86400",
   };
@@ -355,6 +359,72 @@ function adminDeviceId(request) {
   return /^[A-Za-z0-9._:-]{16,160}$/.test(value) ? value : "";
 }
 
+function qrIssuerKey(dbName, issuerId) {
+  return `${dbName}:qr_access_issuer:${issuerId}`;
+}
+
+function qrAccessKey(dbName, accessId) {
+  return `${dbName}:qr_access:${accessId}`;
+}
+
+function qrIssuerAccessKey(dbName, issuerId, accessId) {
+  return `${dbName}:qr_access_issuer_item:${issuerId}:${accessId}`;
+}
+
+function base64UrlEncode(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlDecode(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padding = "=".repeat((4 - normalized.length % 4) % 4);
+  const binary = atob(normalized + padding);
+  return Uint8Array.from(binary, char => char.charCodeAt(0));
+}
+
+function pemToBytes(pem) {
+  const normalized = String(pem || "")
+    .replace(/-----BEGIN PUBLIC KEY-----/g, "")
+    .replace(/-----END PUBLIC KEY-----/g, "")
+    .replace(/\s+/g, "");
+  if (!normalized || normalized.length > 4096) throw new Error("Invalid public key");
+  const binary = atob(normalized);
+  return Uint8Array.from(binary, char => char.charCodeAt(0));
+}
+
+function normaliseQrScopes(values) {
+  const scopes = Array.isArray(values) ? values.map(value => String(value).trim()) : [];
+  const unique = [...new Set(scopes)];
+  return unique.length && unique.length <= ADMIN_SCOPES.size && unique.every(scope => ADMIN_SCOPES.has(scope)) ? unique : null;
+}
+
+function hasAdminScope(adminSession, scope) {
+  const scopes = Array.isArray(adminSession?.scopes) ? adminSession.scopes : [...ADMIN_SCOPES];
+  return scopes.includes(scope);
+}
+
+function requireAdminScope(adminSession, scope) {
+  return hasAdminScope(adminSession, scope) ? null : errorResponse("This QR administrator access does not allow the requested operation", 403);
+}
+
+function publicQrAccess(record) {
+  return {
+    accessId: record.id,
+    nickname: record.nickname,
+    label: record.label || "",
+    scopes: Array.isArray(record.scopes) ? record.scopes : [],
+    status: record.status,
+    createdAt: record.createdAt,
+    expiresAt: record.expiresAt,
+    activatedAt: record.activatedAt || null,
+    lastUsedAt: record.lastUsedAt || null,
+    revokedAt: record.revokedAt || null,
+    revokedReason: record.revokedReason || ""
+  };
+}
+
 async function sha256Hex(value) {
   const bytes = new TextEncoder().encode(String(value));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -391,7 +461,8 @@ async function createAdminSession(request, kv, dbName, env = {}) {
     issuedAt,
     expiresAt,
     deviceHash: await sha256Hex(deviceId),
-    operatorDisplayName: `${user.firstName || ""} ${user.lastName || ""}`.trim() || String(user.email || user.id)
+    operatorDisplayName: `${user.firstName || ""} ${user.lastName || ""}`.trim() || String(user.email || user.id),
+    scopes: [...ADMIN_SCOPES]
   };
   await kv.put(`${dbName}:admin_session:${token}`, JSON.stringify(session), { expirationTtl: ADMIN_SESSION_TTL_SECONDS });
   return { token, ...session };
@@ -654,6 +725,8 @@ async function handleAdminRequest(request, url, kv, dbName, env = {}, adminSessi
   const banMatch = path.match(/^\/api\/admin\/users\/([^/]+)\/ban$/);
 
   if (path === "/api/admin/stats" && method === "GET") {
+    const scopeError = requireAdminScope(adminSession, "accounts.read");
+    if (scopeError) return scopeError;
     const userKeys = await listAllKeys(kv, `${dbName}:user:`);
     const sessionKeys = await listAllKeys(kv, `${dbName}:session:`);
     let activeSessions = 0;
@@ -665,6 +738,8 @@ async function handleAdminRequest(request, url, kv, dbName, env = {}, adminSessi
   }
 
   if (path === "/api/admin/users" && method === "GET") {
+    const scopeError = requireAdminScope(adminSession, "accounts.read");
+    if (scopeError) return scopeError;
     const query = String(url.searchParams.get("query") || "").trim().toLowerCase();
     const userKeys = await listAllKeys(kv, `${dbName}:user:`);
     const users = [];
@@ -682,12 +757,16 @@ async function handleAdminRequest(request, url, kv, dbName, env = {}, adminSessi
   }
 
   if (sessionMatch && method === "GET") {
+    const scopeError = requireAdminScope(adminSession, "accounts.read");
+    if (scopeError) return scopeError;
     const user = await readUser(kv, dbName, sessionMatch[1]);
     if (!user) return errorResponse("User not found", 404);
     return jsonResponse({ user: sanitizeUser(user), sessions: await listUserSessions(kv, dbName, user.id) });
   }
 
   if (banMatch && method === "PUT") {
+    const scopeError = requireAdminScope(adminSession, "accounts.restrict");
+    if (scopeError) return scopeError;
     const user = await readUser(kv, dbName, banMatch[1]);
     if (!user) return errorResponse("User not found", 404);
     const body = await request.json();
@@ -714,6 +793,8 @@ async function handleAdminRequest(request, url, kv, dbName, env = {}, adminSessi
   }
 
   if (userMatch && method === "DELETE") {
+    const scopeError = requireAdminScope(adminSession, "accounts.delete");
+    if (scopeError) return scopeError;
     const user = await readUser(kv, dbName, userMatch[1]);
     if (!user) return errorResponse("User not found", 404);
     await deleteUserRecords(kv, dbName, user, env);
@@ -729,6 +810,8 @@ async function handleAdminRequest(request, url, kv, dbName, env = {}, adminSessi
   }
 
   if (path === "/api/admin/exports/accounts" && method === "GET") {
+    const scopeError = requireAdminScope(adminSession, "exports.write");
+    if (scopeError) return scopeError;
     const identifiers = [...url.searchParams.getAll("id"), ...String(url.searchParams.get("ids") || "").split(",")]
       .map(value => String(value).trim())
       .filter(Boolean)
@@ -759,6 +842,8 @@ async function handleAdminRequest(request, url, kv, dbName, env = {}, adminSessi
   }
 
   if (path === "/api/admin/exports/chat" && method === "GET") {
+    const scopeError = requireAdminScope(adminSession, "exports.write");
+    if (scopeError) return scopeError;
     const type = String(url.searchParams.get("type") || "").trim();
     const conversationId = String(url.searchParams.get("id") || "").trim();
     if (!['direct', 'group'].includes(type) || !conversationId) return errorResponse("A valid conversation type and identifier are required", 400);
@@ -784,15 +869,179 @@ async function handleAdminRequest(request, url, kv, dbName, env = {}, adminSessi
   }
 
   if (path === "/api/admin/messages/redact" && method === "POST") {
+    const scopeError = requireAdminScope(adminSession, "chat.moderate");
+    if (scopeError) return scopeError;
     return redactChatMessage(kv, dbName, await request.json().catch(() => null), adminSession, requestId);
   }
 
   if (path === "/api/admin/audit" && method === "GET") {
+    const scopeError = requireAdminScope(adminSession, "audit.read");
+    if (scopeError) return scopeError;
     const events = JSON.parse((await kv.get(`${dbName}:admin_audit`)) || "[]");
     return jsonResponse({ events: events.slice(-500).reverse() });
   }
 
   return errorResponse("Admin route not found", 404);
+}
+
+async function verifyQrIssuerRequest(request, kv, dbName, body) {
+  const issuerId = String(request.headers.get("X-QR-Issuer-Id") || "").trim();
+  const requestId = String(request.headers.get("X-QR-Request-Id") || "").trim();
+  const requestTime = Number(request.headers.get("X-QR-Request-Time") || 0);
+  const signature = String(request.headers.get("X-QR-Signature") || "").trim();
+  if (!/^[A-Za-z0-9-]{20,120}$/.test(issuerId) || !/^[A-Za-z0-9-]{16,120}$/.test(requestId) || !Number.isFinite(requestTime) || Math.abs(Date.now() - requestTime) > 60 * 1000 || !/^[A-Za-z0-9_-]{128,1024}$/.test(signature)) {
+    return { error: errorResponse("A fresh, signed QR generator request is required", 400) };
+  }
+  const rawIssuer = await kv.get(qrIssuerKey(dbName, issuerId));
+  if (!rawIssuer) return { error: errorResponse("QR generator is not registered", 403) };
+  let issuer;
+  try { issuer = JSON.parse(rawIssuer); } catch (_error) { return { error: errorResponse("QR generator registration is invalid", 403) }; }
+  if (issuer.status !== "active") return { error: errorResponse("QR generator is not active", 403) };
+  const replayKey = `${dbName}:qr_access_request:${issuerId}:${requestId}`;
+  if (await kv.get(replayKey)) return { error: errorResponse("This QR generator request was already processed", 409) };
+  try {
+    const key = await crypto.subtle.importKey("spki", pemToBytes(issuer.publicKeyPem), { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+    const signedPayload = `${issuerId}.${requestId}.${requestTime}.${canonicalJson(body || {})}`;
+    const verified = await crypto.subtle.verify(
+      { name: "RSASSA-PKCS1-v1_5" }, key, base64UrlDecode(signature), new TextEncoder().encode(signedPayload)
+    );
+    if (!verified) return { error: errorResponse("QR generator signature is invalid", 403) };
+  } catch (_error) {
+    return { error: errorResponse("QR generator signature is invalid", 403) };
+  }
+  await kv.put(replayKey, String(requestTime), { expirationTtl: QR_ACCESS_REQUEST_TTL_SECONDS });
+  return { issuer, issuerId, requestId };
+}
+
+async function createQrAdminSession(kv, dbName, access, deviceId) {
+  const token = crypto.randomUUID();
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + ADMIN_SESSION_TTL_SECONDS * 1000;
+  const session = {
+    userId: `qr-access:${access.issuerId}`,
+    issuedAt,
+    expiresAt,
+    deviceHash: await sha256Hex(deviceId),
+    operatorDisplayName: access.nickname,
+    scopes: access.scopes,
+    qrAccessId: access.id
+  };
+  await kv.put(`${dbName}:admin_session:${token}`, JSON.stringify(session), { expirationTtl: ADMIN_SESSION_TTL_SECONDS });
+  return { token, ...session };
+}
+
+async function handleQrAccessRequest(request, url, kv, dbName, env = {}) {
+  const path = url.pathname;
+  const method = request.method;
+
+  if (path === "/api/qr-access/issuers/enroll" && method === "POST") {
+    const enrollmentSecret = String(request.headers.get("X-QR-Enrollment-Secret") || "").trim();
+    if (!(await verifyAdminBootstrapSecret(env, enrollmentSecret))) return errorResponse("A valid owner enrollment secret is required", 403);
+    const body = await request.json().catch(() => null);
+    const publicKeyPem = String(body?.publicKeyPem || "").trim();
+    const label = String(body?.label || "Personal QR Access Generator").trim().slice(0, 120);
+    try {
+      await crypto.subtle.importKey("spki", pemToBytes(publicKeyPem), { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+    } catch (_error) {
+      return errorResponse("The QR generator public key is invalid", 400);
+    }
+    const issuerId = crypto.randomUUID();
+    const issuer = { id: issuerId, label, publicKeyPem, status: "active", createdAt: Date.now() };
+    await kv.put(qrIssuerKey(dbName, issuerId), JSON.stringify(issuer));
+    await writeAdminAudit(kv, dbName, { action: "qr-access.issuer.enroll", actorUserId: "owner", target: `issuer:${issuerId}`, reason: label });
+    return jsonResponse({ issuerId, label, createdAt: issuer.createdAt }, 201);
+  }
+
+  if (path === "/api/qr-access/exchange" && method === "POST") {
+    const body = await request.json().catch(() => null);
+    const accessId = String(body?.accessId || "").trim();
+    const credential = String(body?.credential || "").trim();
+    const deviceId = adminDeviceId(request);
+    if (!/^[A-Za-z0-9-]{20,120}$/.test(accessId) || !/^[A-Za-z0-9_-]{32,128}$/.test(credential) || !deviceId) return errorResponse("A valid QR access file and Android device identifier are required", 400);
+    const rawAccess = await kv.get(qrAccessKey(dbName, accessId));
+    if (!rawAccess) return errorResponse("QR access is unavailable, expired, or has been revoked", 403);
+    let access;
+    try { access = JSON.parse(rawAccess); } catch (_error) { return errorResponse("QR access is invalid", 403); }
+    const now = Date.now();
+    const deviceHash = await sha256Hex(deviceId);
+    const credentialHash = await sha256Hex(credential);
+    if (access.status !== "active" || Number(access.expiresAt || 0) <= now || access.credentialHash !== credentialHash) {
+      await writeAdminAudit(kv, dbName, { action: "qr-access.exchange", actorUserId: access.issuerId || "", target: `access:${accessId}`, reason: "Rejected credential, status, or expiry", outcome: "denied" });
+      return errorResponse("QR access is invalid, expired, or revoked", 403);
+    }
+    if (access.deviceHash && access.deviceHash !== deviceHash) {
+      await writeAdminAudit(kv, dbName, { action: "qr-access.exchange", actorUserId: access.issuerId, target: `access:${accessId}`, reason: "Access is already bound to another Android device", outcome: "denied" });
+      return errorResponse("This QR access has already been activated on another device", 403);
+    }
+    const session = await createQrAdminSession(kv, dbName, access, deviceId);
+    access.deviceHash = deviceHash;
+    access.activatedAt = access.activatedAt || now;
+    access.lastUsedAt = now;
+    await kv.put(qrAccessKey(dbName, accessId), JSON.stringify(access), { expirationTtl: Math.max(1, Math.ceil((Number(access.expiresAt) - now) / 1000)) });
+    await writeAdminAudit(kv, dbName, { action: "qr-access.exchange", actorUserId: access.issuerId, adminSessionToken: session.token, target: `access:${accessId}`, reason: access.nickname, outcome: "success" });
+    return jsonResponse({ accessToken: session.token, expiresAt: session.expiresAt, operatorDisplayName: session.operatorDisplayName, scopes: session.scopes }, 201);
+  }
+
+  const body = method === "GET" ? {} : await request.json().catch(() => null);
+  const signed = await verifyQrIssuerRequest(request, kv, dbName, body);
+  if (signed.error) return signed.error;
+
+  if (path === "/api/qr-access/issue" && method === "POST") {
+    const nickname = String(body?.nickname || "").trim().slice(0, 80);
+    const label = String(body?.label || "").trim().slice(0, 120);
+    const scopes = normaliseQrScopes(body?.scopes);
+    const expiresAt = Date.parse(String(body?.expiresAt || ""));
+    const now = Date.now();
+    if (!nickname || !scopes || !Number.isFinite(expiresAt) || expiresAt < now + QR_ACCESS_MIN_TTL_MS || expiresAt > now + QR_ACCESS_MAX_TTL_MS) {
+      return errorResponse("Nickname, at least one permitted scope, and an expiry between 5 minutes and 180 days are required", 400);
+    }
+    const accessId = crypto.randomUUID();
+    const credentialBytes = new Uint8Array(32);
+    crypto.getRandomValues(credentialBytes);
+    const credential = base64UrlEncode(credentialBytes);
+    const record = { id: accessId, issuerId: signed.issuerId, nickname, label, scopes, credentialHash: await sha256Hex(credential), status: "active", createdAt: now, expiresAt, activatedAt: null, lastUsedAt: null, deviceHash: null };
+    await kv.put(qrAccessKey(dbName, accessId), JSON.stringify(record), { expirationTtl: Math.ceil((expiresAt - now) / 1000) });
+    await kv.put(qrIssuerAccessKey(dbName, signed.issuerId, accessId), JSON.stringify({ accessId, createdAt: now, expiresAt, nickname, label }), { expirationTtl: Math.ceil((expiresAt - now) / 1000) });
+    await writeAdminAudit(kv, dbName, { action: "qr-access.issue", actorUserId: signed.issuerId, target: `access:${accessId}`, reason: `${nickname}; ${scopes.join(",")}`, requestId: signed.requestId });
+    return jsonResponse({ access: publicQrAccess(record), credential }, 201);
+  }
+
+  if (path === "/api/qr-access/issued" && method === "GET") {
+    const pointers = await listAllKeys(kv, `${dbName}:qr_access_issuer_item:${signed.issuerId}:`);
+    const access = [];
+    for (const pointer of pointers.slice(0, 300)) {
+      const rawPointer = await kv.get(pointer.name);
+      if (!rawPointer) continue;
+      try {
+        const item = JSON.parse(rawPointer);
+        const rawAccess = await kv.get(qrAccessKey(dbName, item.accessId));
+        if (rawAccess) access.push(publicQrAccess(JSON.parse(rawAccess)));
+        else access.push({ accessId: item.accessId, nickname: item.nickname, label: item.label || "", scopes: [], status: "expired", createdAt: item.createdAt, expiresAt: item.expiresAt, activatedAt: null, lastUsedAt: null, revokedAt: null, revokedReason: "" });
+      } catch (_error) {}
+    }
+    return jsonResponse({ access: access.sort((left, right) => Number(right.createdAt) - Number(left.createdAt)) });
+  }
+
+  const revokeMatch = path.match(/^\/api\/qr-access\/([^/]+)\/revoke$/);
+  if (revokeMatch && method === "POST") {
+    const accessId = revokeMatch[1];
+    const reason = String(body?.reason || "").trim().slice(0, 240);
+    if (reason.length < 3) return errorResponse("A revocation reason of at least three characters is required", 400);
+    const rawAccess = await kv.get(qrAccessKey(dbName, accessId));
+    if (!rawAccess) return errorResponse("QR access not found or already expired", 404);
+    let access;
+    try { access = JSON.parse(rawAccess); } catch (_error) { return errorResponse("QR access is invalid", 400); }
+    if (access.issuerId !== signed.issuerId) return errorResponse("This QR access belongs to another generator", 403);
+    if (access.status === "revoked") return errorResponse("QR access has already been revoked", 409);
+    access.status = "revoked";
+    access.revokedAt = Date.now();
+    access.revokedReason = reason;
+    await kv.put(qrAccessKey(dbName, accessId), JSON.stringify(access), { expirationTtl: Math.max(1, Math.ceil((Number(access.expiresAt) - Date.now()) / 1000)) });
+    await writeAdminAudit(kv, dbName, { action: "qr-access.revoke", actorUserId: signed.issuerId, target: `access:${accessId}`, reason, requestId: signed.requestId });
+    return jsonResponse({ status: "success", access: publicQrAccess(access) });
+  }
+
+  return errorResponse("QR access route not found", 404);
 }
 
 async function handleFetch(request, env = {}, ctx) {
@@ -838,6 +1087,15 @@ async function handleFetch(request, env = {}, ctx) {
         message: `OrvexaAuth Beta Cloudflare Server Active (DB: ${dbName})`,
         serverTime: Date.now()
       });
+    }
+
+    if (path.startsWith("/api/qr-access/")) {
+      try {
+        return await handleQrAccessRequest(request, url, kv, dbName, env);
+      } catch (error) {
+        console.error("OrvexaAuth QR access route error", error);
+        return errorResponse("QR access operation failed", 500);
+      }
     }
 
     if (path === "/api/admin/session" && method === "POST") {
