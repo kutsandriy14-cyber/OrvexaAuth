@@ -132,7 +132,14 @@ object Translation {
         "privacy_terms_desc" to "To create an OrvexaAuth Beta Account, you'll need to agree to the Terms of Service below",
         "agreement_title" to "OrvexaAuth Beta Account Agreement",
         "agreement_body" to "Welcome to OrvexaAuth! By clicking \"I agree\" below, you establish a secure account registered on the central OrvexaAuth database server.\n\n1. Database Security: All credentials and metadata are safely transmitted and registered in the central server database.\n\n2. Privacy: We adhere to highest privacy policies. Your registration details, phone number, and security options are protected under secure connection protocols.\n\n3. Deletion: You possess full control over your account. You can request account deletion anytime directly via the Security tab on your user Dashboard.",
-        "connection_tip" to "💡 Connection tip: Tap the ⚙️ gear icon in the top corner of the main screen to verify your Server URL. Make sure the backend server is running and accessible on your network."
+        "connection_tip" to "💡 Connection tip: Tap the ⚙️ gear icon in the top corner of the main screen to verify your Server URL. Make sure the backend server is running and accessible on your network.",
+        "update_available" to "Update available",
+        "update_available_desc" to "OrvexaAuth {version} is ready to download and install.",
+        "update_now" to "Update now",
+        "update_later" to "Later",
+        "downloading" to "Downloading update…",
+        "update_progress" to "{downloaded} of {total} • {percent}%",
+        "update_preparing" to "Checking the file and opening the installer…"
     )
 
     private val uk = mapOf(
@@ -264,7 +271,14 @@ object Translation {
         "privacy_terms_desc" to "Щоб створити акаунт OrvexaAuth Beta, вам необхідно погодитися з Умовами надання послуг",
         "agreement_title" to "Угода про обліковий запис OrvexaAuth Beta",
         "agreement_body" to "Ласкаво просимо до OrvexaAuth! Натискаючи кнопку «Я згоден» нижче, ви створюєте безпечний обліковий запис, зареєстрований на центральному сервері бази даних OrvexaAuth.\n\n1. Безпека бази даних: усі облікові дані та метадані надійно передаються та реєструються в базі даних центрального сервера.\n\n2. Конфіденційність: ми дотримуємося найсуворішої політики конфіденційності. Ваші реєстраційні дані, номер телефону та параметри безпеки захищені протоколами безпечного з'єднання.\n\n3. Видалення: ви маєте повний контроль над своїм обліковим записом. Ви можете подати запит на видалення облікового запису в будь-який час безпосередньо через вкладку Безпека на панелі користувача.",
-        "connection_tip" to "💡 Підказка щодо з'єднання: Натисніть значок ⚙️ у верхньому кутку головного екрана, щоб перевірити адресу вашого сервера. Переконайтеся, що сервер запущено та він доступний у вашій мережі."
+        "connection_tip" to "💡 Підказка щодо з'єднання: Натисніть значок ⚙️ у верхньому кутку головного екрана, щоб перевірити адресу вашого сервера. Переконайтеся, що сервер запущено та він доступний у вашій мережі.",
+        "update_available" to "Доступне оновлення",
+        "update_available_desc" to "OrvexaAuth {version} готовий до завантаження та встановлення.",
+        "update_now" to "Оновити",
+        "update_later" to "Пізніше",
+        "downloading" to "Завантаження оновлення…",
+        "update_progress" to "{downloaded} із {total} • {percent}%",
+        "update_preparing" to "Перевірка файлу й відкриття встановлювача…"
     )
 
     private val ru = mapOf(
@@ -398,13 +412,83 @@ object Translation {
         "privacy_terms_desc" to "Чтобы создать аккаунт OrvexaAuth, вам необходимо согласиться с Условиями предоставления услуг",
         "agreement_title" to "Соглашение об учетной записи OrvexaAuth",
         "agreement_body" to "Добро пожаловать в OrvexaAuth! Нажимая кнопку «Я согласен» ниже, вы создаете безопасную учетную запись, зарегистрированную на центральном сервере базы данных OrvexaAuth.\n\n1. Безопасность базы данных: все учетные данные и метаданные надежно передаются и регистрируются в базе данных центрального сервера.\n\n2. Конфиденциальность: мы придерживаемся строгой политики конфиденциальности. Ваши регистрационные данные, номер телефона и параметры безопасности защищены протоколами безопасного соединения.\n\n3. Удаление: вы полностью контролируете свою учетную запись. Вы можете запросить удаление учетной записи в любое время непосредственно через вкладку Безопасность на панели пользователя.",
-        "connection_tip" to "💡 Подсказка по соединению: Нажмите значок ⚙️ в верхнем углу главного экрана, чтобы проверить адрес вашего сервера. Убедитесь, что сервер запущен и доступен в вашей сети."
+        "connection_tip" to "💡 Подсказка по соединению: Нажмите значок ⚙️ в верхнем углу главного экрана, чтобы проверить адрес вашего сервера. Убедитесь, что сервер запущен и доступен в вашей сети.",
+        "update_available" to "Доступно обновление",
+        "update_available_desc" to "OrvexaAuth {version} готов к скачиванию и установке.",
+        "update_now" to "Обновить",
+        "update_later" to "Позже",
+        "downloading" to "Скачивание обновления…",
+        "update_progress" to "{downloaded} из {total} • {percent}%",
+        "update_preparing" to "Проверка файла и открытие установщика…"
+    )
+
+    /** New languages inherit reviewed English text for less-used legacy screens. */
+    private val pl = en + mapOf(
+        "select_lang" to "Język", "select_account" to "Wybierz konto",
+        "signin" to "Zaloguj się", "register" to "Utwórz konto",
+        "enter_email" to "Adres e-mail", "enter_password" to "Hasło",
+        "tab_profile" to "Profil", "tab_security" to "Bezpieczeństwo",
+        "tab_messages" to "Wiadomości", "logout" to "Wyloguj",
+        "cancel" to "Anuluj", "next" to "Dalej", "back" to "Wstecz",
+        "save" to "Zapisz", "close" to "Zamknij", "delete_account" to "Usuń konto",
+        "update_available" to "Dostępna aktualizacja",
+        "update_available_desc" to "OrvexaAuth {version} jest gotowy do pobrania i instalacji.",
+        "update_now" to "Aktualizuj", "update_later" to "Później",
+        "downloading" to "Pobieranie aktualizacji…",
+        "update_progress" to "{downloaded} z {total} • {percent}%",
+        "update_preparing" to "Sprawdzanie pliku i otwieranie instalatora…"
+    )
+
+    private val de = en + mapOf(
+        "select_lang" to "Sprache", "select_account" to "Konto auswählen",
+        "signin" to "Anmelden", "register" to "Konto erstellen",
+        "enter_email" to "E-Mail-Adresse", "enter_password" to "Passwort",
+        "tab_profile" to "Profil", "tab_security" to "Sicherheit",
+        "tab_messages" to "Nachrichten", "logout" to "Abmelden",
+        "cancel" to "Abbrechen", "next" to "Weiter", "back" to "Zurück",
+        "save" to "Speichern", "close" to "Schließen", "delete_account" to "Konto löschen",
+        "update_available" to "Update verfügbar",
+        "update_available_desc" to "OrvexaAuth {version} kann heruntergeladen und installiert werden.",
+        "update_now" to "Jetzt aktualisieren", "update_later" to "Später",
+        "downloading" to "Update wird heruntergeladen…",
+        "update_progress" to "{downloaded} von {total} • {percent}%",
+        "update_preparing" to "Datei wird geprüft, Installationsprogramm wird geöffnet…"
+    )
+
+    private val es = en + mapOf(
+        "select_lang" to "Idioma", "select_account" to "Seleccionar cuenta",
+        "signin" to "Iniciar sesión", "register" to "Crear cuenta",
+        "enter_email" to "Correo electrónico", "enter_password" to "Contraseña",
+        "tab_profile" to "Perfil", "tab_security" to "Seguridad",
+        "tab_messages" to "Mensajes", "logout" to "Cerrar sesión",
+        "cancel" to "Cancelar", "next" to "Siguiente", "back" to "Atrás",
+        "save" to "Guardar", "close" to "Cerrar", "delete_account" to "Eliminar cuenta",
+        "update_available" to "Actualización disponible",
+        "update_available_desc" to "OrvexaAuth {version} está listo para descargarse e instalarse.",
+        "update_now" to "Actualizar ahora", "update_later" to "Más tarde",
+        "downloading" to "Descargando actualización…",
+        "update_progress" to "{downloaded} de {total} • {percent}%",
+        "update_preparing" to "Comprobando el archivo y abriendo el instalador…"
+    )
+
+    data class SupportedLanguage(val code: String, val nativeName: String)
+
+    val supportedLanguages = listOf(
+        SupportedLanguage("en", "English"),
+        SupportedLanguage("uk", "Українська"),
+        SupportedLanguage("ru", "Русский"),
+        SupportedLanguage("pl", "Polski"),
+        SupportedLanguage("de", "Deutsch"),
+        SupportedLanguage("es", "Español")
     )
 
     fun get(key: String, lang: String): String {
         return when (lang) {
             "uk" -> uk[key] ?: en[key] ?: key
             "ru" -> ru[key] ?: en[key] ?: key
+            "pl" -> pl[key] ?: en[key] ?: key
+            "de" -> de[key] ?: en[key] ?: key
+            "es" -> es[key] ?: en[key] ?: key
             else -> en[key] ?: key
         }
     }

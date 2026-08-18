@@ -60,7 +60,9 @@ class SecureStore(context: Context) {
             }
             String(cipher.doFinal(ciphertext), Charsets.UTF_8)
         } catch (_: Exception) {
-            preferences.edit().remove(name).apply()
+            // Do not destroy encrypted session material on a transient Keystore or
+            // provider error. A successful retry after device unlock or an app
+            // restart can still decrypt it; invalid sessions are revoked by the API.
             null
         }
     }
@@ -82,4 +84,3 @@ class SecureStore(context: Context) {
         const val GCM_TAG_LENGTH = 128
     }
 }
-

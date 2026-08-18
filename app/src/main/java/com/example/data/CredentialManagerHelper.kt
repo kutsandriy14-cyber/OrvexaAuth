@@ -18,10 +18,12 @@ class CredentialManagerHelper(context: Context) {
     private val appContext = context.applicationContext
     private val manager = CredentialManager.create(appContext)
 
-    suspend fun savePassword(username: String, password: String): Result<Unit> {
+    suspend fun savePassword(foregroundContext: Context, username: String, password: String): Result<Unit> {
         return try {
             manager.createCredential(
-                context = appContext,
+                // Creation may show the provider's UI, therefore it must receive
+                // the current Activity context rather than the application context.
+                context = foregroundContext,
                 request = CreatePasswordRequest(id = username.trim(), password = password)
             )
             Result.success(Unit)

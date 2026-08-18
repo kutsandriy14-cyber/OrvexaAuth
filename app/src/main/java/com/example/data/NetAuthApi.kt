@@ -8,6 +8,8 @@ import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.*
 import java.util.concurrent.TimeUnit
+import org.json.JSONArray
+import org.json.JSONObject
 
 // Network Data Models
 data class StatusResponse(
@@ -57,6 +59,33 @@ data class NetworkUpdatePasswordRequest(
     val passwordHash: String
 )
 
+/**
+ * Administrative data is supplied only after an operator enters a temporary
+ * credential. The credential is never a field of these models and is never
+ * written to preferences, SecureStore or a database.
+ */
+data class NetworkAdminStats(
+    val users: Int = 0,
+    val sessions: Int = 0,
+    val activeSessions: Int = 0,
+    val generatedAt: Long = 0L
+)
+
+data class NetworkAdminUsersResponse(
+    val users: List<NetworkUserResponse> = emptyList(),
+    val total: Int = 0
+)
+
+data class NetworkAdminUserSessionsResponse(
+    val user: NetworkUserResponse,
+    val sessions: List<NetworkDeviceSession> = emptyList()
+)
+
+data class NetworkAdminBanRequest(
+    val banned: Boolean,
+    val reason: String = ""
+)
+
 data class NetworkUserResponse(
     val id: Int,
     val email: String,
@@ -79,6 +108,8 @@ data class NetworkUserResponse(
     @com.squareup.moshi.Json(name = "data_quota_mb") val dataQuotaMbSnake: Int? = null,
     @com.squareup.moshi.Json(name = "createdAt") val createdAtCamel: Long? = null,
     @com.squareup.moshi.Json(name = "created_at") val createdAtSnake: Long? = null,
+    val isBanned: Boolean = false,
+    val banReason: String? = null,
     val sessionToken: String? = null,
     val expiresAt: Long? = null
 ) {
@@ -232,6 +263,31 @@ interface NetAuthService {
     suspend fun clearDatabase(): StatusResponse
 }
 
+/**
+ * The Worker accepts only an `Authorization: Admin <temporary token>` header
+ * for these routes. This interface is intentionally separate from the normal
+ * bearer-session client so ordinary user actions can never inherit admin access.
+ */
+interface NetAuthAdminService {
+    @GET("api/admin/stats")
+    suspend fun getStats(): NetworkAdminStats
+
+    @GET("api/admin/users")
+    suspend fun getUsers(@Query("query") query: String? = null): NetworkAdminUsersResponse
+
+    @GET("api/admin/users/{id}/sessions")
+    suspend fun getUserSessions(@Path("id") id: Int): NetworkAdminUserSessionsResponse
+
+    @PUT("api/admin/users/{id}/ban")
+    suspend fun setUserBan(
+        @Path("id") id: Int,
+        @Body request: NetworkAdminBanRequest
+    ): StatusResponse
+
+    @DELETE("api/admin/users/{id}")
+    suspend fun deleteUser(@Path("id") id: Int): StatusResponse
+}
+
 data class NetworkMessage(
     val id: Int,
     @com.squareup.moshi.Json(name = "senderEmail") val senderEmailCamel: String? = null,
@@ -344,6 +400,8 @@ class NetAuthClientManager(private val context: Context) {
 
     companion object {
         const val DEFAULT_SERVER_URL = "https://orvexaauth-api.bot724524.workers.dev/"
+        private const val REMEMBERED_ACCOUNTS_KEY = "remembered_accounts_v1"
+        private const val MAX_REMEMBERED_ACCOUNTS = 6
     }
 
     /** The beta client has one public Cloudflare endpoint and does not save server settings. */
@@ -420,8 +478,75 @@ class NetAuthClientManager(private val context: Context) {
             .putInt("user_quota", user.dataQuotaMb)
             .putLong("user_created_at", user.createdAt)
             .apply()
+        rememberAccount(user)
         // Password hashes are never persisted as session material.
         secureStore.remove("user_password_hash")
+    }
+
+    /**
+     * Stores only public profile identifiers for the account picker. Passwords,
+     * password hashes, bearer tokens and recovery keys are never part of this list.
+     */
+    fun getRememberedAccounts(): List<User> {
+        val raw = prefs.getString(REMEMBERED_ACCOUNTS_KEY, null) ?: return emptyList()
+        return try {
+            val array = JSONArray(raw)
+            buildList {
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index) ?: continue
+                    val email = item.optString("email").trim()
+                    if (email.isBlank()) continue
+                    add(
+                        User(
+                            id = item.optInt("id"),
+                            email = email,
+                            passwordHash = "",
+                            firstName = item.optString("first_name"),
+                            lastName = item.optString("last_name"),
+                            birthDate = "",
+                            gender = "",
+                            avatarColor = item.optInt("avatar_color"),
+                            ipAddress = "",
+                            macAddress = "",
+                            keyProtect = "",
+                            dataQuotaMb = 0,
+                            createdAt = 0L
+                        )
+                    )
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun removeRememberedAccount(email: String) {
+        val target = email.trim().lowercase()
+        persistRememberedAccounts(getRememberedAccounts().filterNot { it.email.lowercase() == target })
+    }
+
+    private fun rememberAccount(user: User) {
+        val normalizedEmail = user.email.trim().lowercase()
+        if (normalizedEmail.isBlank()) return
+        val merged = listOf(user) + getRememberedAccounts().filterNot {
+            it.email.trim().lowercase() == normalizedEmail
+        }
+        persistRememberedAccounts(merged.take(MAX_REMEMBERED_ACCOUNTS))
+    }
+
+    private fun persistRememberedAccounts(accounts: List<User>) {
+        val serialized = JSONArray()
+        accounts.forEach { user ->
+            serialized.put(
+                JSONObject()
+                    .put("id", user.id)
+                    .put("email", user.email.trim())
+                    .put("first_name", user.firstName)
+                    .put("last_name", user.lastName)
+                    .put("avatar_color", user.avatarColor)
+            )
+        }
+        prefs.edit().putString(REMEMBERED_ACCOUNTS_KEY, serialized.toString()).apply()
     }
 
     fun getLoggedInUser(): User? {
@@ -466,6 +591,43 @@ class NetAuthClientManager(private val context: Context) {
     @Synchronized
     fun getService(): NetAuthService {
         return cachedService ?: rebuildService()
+    }
+
+    /**
+     * Creates an isolated, non-cached Retrofit service for a temporary admin
+     * token. Callers keep the returned service only in ViewModel memory and
+     * must discard it when the administrative panel is closed.
+     */
+    fun createAdminService(temporaryToken: String): NetAuthAdminService {
+        require(temporaryToken.isNotBlank()) { "Administrator token is required" }
+
+        val logging = HttpLoggingInterceptor().apply {
+            level = HttpLoggingInterceptor.Level.NONE
+        }
+        val adminHeaderInterceptor = okhttp3.Interceptor { chain ->
+            val request = chain.request().newBuilder()
+                .header("X-App-Name", "OrvexaAuthAndroid-Beta")
+                .header("Authorization", "Admin $temporaryToken")
+                .build()
+            chain.proceed(request)
+        }
+        val client = OkHttpClient.Builder()
+            .connectionSpecs(listOf(okhttp3.ConnectionSpec.MODERN_TLS))
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .addInterceptor(adminHeaderInterceptor)
+            .addInterceptor(logging)
+            .build()
+        val moshi = com.squareup.moshi.Moshi.Builder()
+            .add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+            .build()
+        return Retrofit.Builder()
+            .baseUrl(serverUrl)
+            .client(client)
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
+            .build()
+            .create(NetAuthAdminService::class.java)
     }
 
     private fun rebuildService(): NetAuthService {

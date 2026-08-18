@@ -11,6 +11,9 @@ import com.example.BuildConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -39,6 +42,19 @@ object UpdateManager {
         val apkUrl: String,
         val sha256: String
     )
+
+    /**
+     * State for the foreground update UI. A negative total or percent means that
+     * the download server did not send a Content-Length header.
+     */
+    data class DownloadProgress(
+        val downloadedBytes: Long,
+        val totalBytes: Long,
+        val percent: Int
+    )
+
+    private val _downloadProgress = MutableStateFlow<DownloadProgress?>(null)
+    val downloadProgress: StateFlow<DownloadProgress?> = _downloadProgress.asStateFlow()
 
     private data class SemanticVersion(
         val major: Int,
@@ -139,7 +155,10 @@ object UpdateManager {
                 }
 
                 val apkFile = File(appContext.cacheDir, "OrvexaAuth-${update.tag.removePrefix("v")}.apk")
-                downloadToFile(update.apkUrl, apkFile)
+                _downloadProgress.value = DownloadProgress(0L, -1L, -1)
+                downloadToFile(update.apkUrl, apkFile) { progress ->
+                    _downloadProgress.value = progress
+                }
                 if (update.sha256 != sha256(apkFile)) {
                     apkFile.delete()
                     error("APK checksum verification failed")
@@ -183,15 +202,43 @@ object UpdateManager {
         }
     }
 
-    private fun downloadToFile(url: String, destination: File) {
+    private suspend fun downloadToFile(
+        url: String,
+        destination: File,
+        onProgress: (DownloadProgress) -> Unit
+    ) {
         check(isTrustedReleaseUrl(url)) { "Untrusted APK URL" }
         val request = Request.Builder().url(url).build()
-        client.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "Download failed: ${response.code}" }
-            val body = response.body ?: error("Empty APK response")
-            body.byteStream().use { input ->
-                FileOutputStream(destination).use { output -> input.copyTo(output) }
+        destination.delete()
+        try {
+            client.newCall(request).execute().use { response ->
+                check(response.isSuccessful) { "Download failed: ${response.code}" }
+                val body = response.body ?: error("Empty APK response")
+                val totalBytes = body.contentLength()
+                var downloadedBytes = 0L
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+
+                body.byteStream().use { input ->
+                    FileOutputStream(destination).use { output ->
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            output.write(buffer, 0, read)
+                            downloadedBytes += read
+                            val percent = if (totalBytes > 0L) {
+                                ((downloadedBytes * 100L) / totalBytes).toInt().coerceIn(0, 100)
+                            } else {
+                                -1
+                            }
+                            onProgress(DownloadProgress(downloadedBytes, totalBytes, percent))
+                        }
+                        output.flush()
+                    }
+                }
             }
+        } catch (error: Exception) {
+            destination.delete()
+            throw error
         }
     }
 

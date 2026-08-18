@@ -131,14 +131,45 @@ fun GoogleCard(content: @Composable ColumnScope.() -> Unit) {
 @Composable
 fun LanguageSwitcher(viewModel: AccountViewModel) {
     val language by viewModel.language.collectAsStateWithLifecycle()
-    TextButton(onClick = { viewModel.setLanguage(if (language == "ru") "en" else "ru") }) {
-        Text(if (language == "ru") "EN" else "RU")
+    var expanded by remember { mutableStateOf(false) }
+    val selected = Translation.supportedLanguages.firstOrNull { it.code == language }
+        ?: Translation.supportedLanguages.first()
+
+    Box {
+        TextButton(
+            onClick = { expanded = true },
+            modifier = Modifier.testTag("language_selector")
+        ) {
+            Text(selected.nativeName)
+            Spacer(modifier = Modifier.width(4.dp))
+            Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = null)
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            Translation.supportedLanguages.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option.nativeName) },
+                    onClick = {
+                        viewModel.setLanguage(option.code)
+                        expanded = false
+                    },
+                    modifier = Modifier.testTag("language_option_${option.code}")
+                )
+            }
+        }
     }
 }
 
 fun copyToClipboard(context: Context, value: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
     clipboard?.setPrimaryClip(ClipData.newPlainText("OrvexaAuth", value))
+}
+
+private fun formatMegabytes(bytes: Long): String {
+    if (bytes < 0L) return "—"
+    return String.format(java.util.Locale.getDefault(), "%.1f MB", bytes / (1024.0 * 1024.0))
 }
 
 // 1. Account Chooser Screen (Clean, Client-Only Login Selection)
@@ -148,7 +179,7 @@ fun AccountChooserScreen(
     viewModel: AccountViewModel,
     onNavigate: (Screen) -> Unit
 ) {
-    val users by viewModel.allUsers.collectAsStateWithLifecycle()
+    val users by viewModel.rememberedAccounts.collectAsStateWithLifecycle()
     val lang by viewModel.language.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
@@ -217,7 +248,7 @@ fun AccountChooserScreen(
                                     )
                                     Spacer(modifier = Modifier.height(12.dp))
                                     Text(
-                                        text = viewModel.t("no_accounts_server"),
+                                        text = "No accounts have been used on this device yet.",
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -581,7 +612,7 @@ fun SignInScreen(
 
                         Button(
                             onClick = {
-                                viewModel.performLogin {
+                                viewModel.performLogin(context) {
                                     onLoginSuccess()
                                 }
                             },
@@ -1000,6 +1031,7 @@ fun RegisterTermsScreen(
     onRegisterSuccess: () -> Unit
 ) {
     val error by viewModel.regError.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
     Column(
         modifier = Modifier
@@ -1083,7 +1115,7 @@ fun RegisterTermsScreen(
 
                     Button(
                         onClick = {
-                            viewModel.performRegistration {
+                            viewModel.performRegistration(context) {
                                 onRegisterSuccess()
                             }
                         },
@@ -1108,6 +1140,8 @@ fun DashboardScreen(
     val lang by viewModel.language.collectAsStateWithLifecycle()
     var activeTab by remember { mutableIntStateOf(0) }
     var availableUpdate by remember { mutableStateOf<UpdateManager.ReleaseUpdate?>(null) }
+    var updateDialogVisible by remember { mutableStateOf(true) }
+    val downloadProgress by UpdateManager.downloadProgress.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) {
         availableUpdate = UpdateManager.check()
@@ -1169,7 +1203,7 @@ fun DashboardScreen(
                 actions = {
                     availableUpdate?.let { update ->
                         IconButton(
-                            onClick = { UpdateManager.downloadAndOpenInstaller(currentContext, update) },
+                            onClick = { updateDialogVisible = true },
                             modifier = Modifier.testTag("dashboard_update_button")
                         ) {
                             Icon(Icons.Rounded.SystemUpdate, contentDescription = "Update OrvexaAuth")
@@ -1245,6 +1279,85 @@ fun DashboardScreen(
                 4 -> DashboardSocialTab(viewModel = viewModel)
             }
         }
+    }
+
+    val update = availableUpdate
+    if (update != null && updateDialogVisible) {
+        val progress = downloadProgress
+        val isDownloading = progress != null && progress.percent != 100
+        val progressLabel = when {
+            progress == null -> ""
+            progress.totalBytes > 0L && progress.percent >= 0 -> {
+                viewModel.t("update_progress")
+                    .replace("{downloaded}", formatMegabytes(progress.downloadedBytes))
+                    .replace("{total}", formatMegabytes(progress.totalBytes))
+                    .replace("{percent}", progress.percent.toString())
+            }
+            progress.downloadedBytes > 0L -> formatMegabytes(progress.downloadedBytes)
+            else -> viewModel.t("downloading")
+        }
+
+        AlertDialog(
+            onDismissRequest = {
+                if (!isDownloading) updateDialogVisible = false
+            },
+            icon = {
+                Icon(
+                    imageVector = Icons.Rounded.SystemUpdate,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            },
+            title = { Text(viewModel.t("update_available")) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        viewModel.t("update_available_desc")
+                            .replace("{version}", update.tag.removePrefix("v"))
+                    )
+                    if (progress != null) {
+                        Text(
+                            if (progress.percent == 100) {
+                                viewModel.t("update_preparing")
+                            } else {
+                                viewModel.t("downloading")
+                            },
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        if (progress.totalBytes > 0L && progress.percent >= 0) {
+                            LinearProgressIndicator(
+                                progress = { progress.percent.coerceIn(0, 100) / 100f },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        } else {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                        Text(
+                            progressLabel,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { updateDialogVisible = false },
+                    enabled = !isDownloading
+                ) {
+                    Text(viewModel.t("update_later"))
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { UpdateManager.downloadAndOpenInstaller(currentContext, update) },
+                    enabled = !isDownloading && progress?.percent != 100
+                ) {
+                    Text(viewModel.t("update_now"))
+                }
+            }
+        )
     }
 }
 
@@ -1625,6 +1738,7 @@ fun DashboardSecurityTab(
     var showTotpDialog by remember { mutableStateOf(false) }
     var totpSecret by remember { mutableStateOf<String?>(null) }
     var totpCode by remember { mutableStateOf("") }
+    var showAdminManagement by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -1814,6 +1928,28 @@ fun DashboardSecurityTab(
 
         GoogleCard {
             Column(modifier = Modifier.padding(16.dp)) {
+                Text("Administrator controls", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                Text(
+                    "Open a temporary, token-protected panel to inspect accounts, sessions and account restrictions. The token is never stored on this phone.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
+                )
+                OutlinedButton(
+                    onClick = { showAdminManagement = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Rounded.Security, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Open administrator controls")
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        GoogleCard {
+            Column(modifier = Modifier.padding(16.dp)) {
                 Text(
                     text = "Danger zone",
                     style = MaterialTheme.typography.titleMedium,
@@ -1839,6 +1975,13 @@ fun DashboardSecurityTab(
                     Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.error)
                 }
             }
+        }
+
+        if (showAdminManagement) {
+            AdminManagementDialog(
+                viewModel = viewModel,
+                onDismiss = { showAdminManagement = false }
+            )
         }
 
         if (showTotpDialog) {
