@@ -59,33 +59,6 @@ data class NetworkUpdatePasswordRequest(
     val passwordHash: String
 )
 
-/**
- * Administrative data is supplied only after an operator enters a temporary
- * credential. The credential is never a field of these models and is never
- * written to preferences, SecureStore or a database.
- */
-data class NetworkAdminStats(
-    val users: Int = 0,
-    val sessions: Int = 0,
-    val activeSessions: Int = 0,
-    val generatedAt: Long = 0L
-)
-
-data class NetworkAdminUsersResponse(
-    val users: List<NetworkUserResponse> = emptyList(),
-    val total: Int = 0
-)
-
-data class NetworkAdminUserSessionsResponse(
-    val user: NetworkUserResponse,
-    val sessions: List<NetworkDeviceSession> = emptyList()
-)
-
-data class NetworkAdminBanRequest(
-    val banned: Boolean,
-    val reason: String = ""
-)
-
 data class NetworkUserResponse(
     val id: Int,
     val email: String,
@@ -261,31 +234,6 @@ interface NetAuthService {
 
     @POST("api/database/clear")
     suspend fun clearDatabase(): StatusResponse
-}
-
-/**
- * The Worker accepts only an `Authorization: Admin <temporary token>` header
- * for these routes. This interface is intentionally separate from the normal
- * bearer-session client so ordinary user actions can never inherit admin access.
- */
-interface NetAuthAdminService {
-    @GET("api/admin/stats")
-    suspend fun getStats(): NetworkAdminStats
-
-    @GET("api/admin/users")
-    suspend fun getUsers(@Query("query") query: String? = null): NetworkAdminUsersResponse
-
-    @GET("api/admin/users/{id}/sessions")
-    suspend fun getUserSessions(@Path("id") id: Int): NetworkAdminUserSessionsResponse
-
-    @PUT("api/admin/users/{id}/ban")
-    suspend fun setUserBan(
-        @Path("id") id: Int,
-        @Body request: NetworkAdminBanRequest
-    ): StatusResponse
-
-    @DELETE("api/admin/users/{id}")
-    suspend fun deleteUser(@Path("id") id: Int): StatusResponse
 }
 
 data class NetworkMessage(
@@ -591,43 +539,6 @@ class NetAuthClientManager(private val context: Context) {
     @Synchronized
     fun getService(): NetAuthService {
         return cachedService ?: rebuildService()
-    }
-
-    /**
-     * Creates an isolated, non-cached Retrofit service for a temporary admin
-     * token. Callers keep the returned service only in ViewModel memory and
-     * must discard it when the administrative panel is closed.
-     */
-    fun createAdminService(temporaryToken: String): NetAuthAdminService {
-        require(temporaryToken.isNotBlank()) { "Administrator token is required" }
-
-        val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.NONE
-        }
-        val adminHeaderInterceptor = okhttp3.Interceptor { chain ->
-            val request = chain.request().newBuilder()
-                .header("X-App-Name", "OrvexaAuthAndroid-Beta")
-                .header("Authorization", "Admin $temporaryToken")
-                .build()
-            chain.proceed(request)
-        }
-        val client = OkHttpClient.Builder()
-            .connectionSpecs(listOf(okhttp3.ConnectionSpec.MODERN_TLS))
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
-            .addInterceptor(adminHeaderInterceptor)
-            .addInterceptor(logging)
-            .build()
-        val moshi = com.squareup.moshi.Moshi.Builder()
-            .add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
-            .build()
-        return Retrofit.Builder()
-            .baseUrl(serverUrl)
-            .client(client)
-            .addConverterFactory(MoshiConverterFactory.create(moshi))
-            .build()
-            .create(NetAuthAdminService::class.java)
     }
 
     private fun rebuildService(): NetAuthService {

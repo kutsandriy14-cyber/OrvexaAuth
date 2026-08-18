@@ -1738,7 +1738,6 @@ fun DashboardSecurityTab(
     var showTotpDialog by remember { mutableStateOf(false) }
     var totpSecret by remember { mutableStateOf<String?>(null) }
     var totpCode by remember { mutableStateOf("") }
-    var showAdminManagement by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -1928,28 +1927,6 @@ fun DashboardSecurityTab(
 
         GoogleCard {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("Administrator controls", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                Text(
-                    "Open a temporary, token-protected panel to inspect accounts, sessions and account restrictions. The token is never stored on this phone.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
-                )
-                OutlinedButton(
-                    onClick = { showAdminManagement = true },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(Icons.Rounded.Security, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Open administrator controls")
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        GoogleCard {
-            Column(modifier = Modifier.padding(16.dp)) {
                 Text(
                     text = "Danger zone",
                     style = MaterialTheme.typography.titleMedium,
@@ -1975,13 +1952,6 @@ fun DashboardSecurityTab(
                     Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.error)
                 }
             }
-        }
-
-        if (showAdminManagement) {
-            AdminManagementDialog(
-                viewModel = viewModel,
-                onDismiss = { showAdminManagement = false }
-            )
         }
 
         if (showTotpDialog) {

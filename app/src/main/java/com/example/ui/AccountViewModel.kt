@@ -74,19 +74,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
     private val _groups = MutableStateFlow<List<NetworkGroup>>(emptyList())
     val groups: StateFlow<List<NetworkGroup>> = _groups.asStateFlow()
 
-    // Administrative credentials are deliberately memory-only. No token is
-    // written to preferences, SecureStore or a database, and closing the panel
-    // clears the only retained client instance that carries the header.
-    private var adminService: NetAuthAdminService? = null
-    private val _adminAuthorized = MutableStateFlow(false)
-    val adminAuthorized: StateFlow<Boolean> = _adminAuthorized.asStateFlow()
-    private val _adminStats = MutableStateFlow<NetworkAdminStats?>(null)
-    val adminStats: StateFlow<NetworkAdminStats?> = _adminStats.asStateFlow()
-    private val _adminUsers = MutableStateFlow<List<NetworkUserResponse>>(emptyList())
-    val adminUsers: StateFlow<List<NetworkUserResponse>> = _adminUsers.asStateFlow()
-    private val _adminSelectedSessions = MutableStateFlow<NetworkAdminUserSessionsResponse?>(null)
-    val adminSelectedSessions: StateFlow<NetworkAdminUserSessionsResponse?> = _adminSelectedSessions.asStateFlow()
-
     // Current logged-in user state
     private val _loggedInUser = MutableStateFlow<User?>(null)
     val loggedInUser: StateFlow<User?> = _loggedInUser.asStateFlow()
@@ -1278,101 +1265,6 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 .onSuccess { refreshConnectedAccountData(); onResult(true, "Group created") }
                 .onFailure { onResult(false, it.localizedMessage ?: "Could not create group") }
         }
-    }
-
-    fun beginAdminSession(temporaryToken: String, onResult: (Boolean, String) -> Unit) {
-        if (temporaryToken.isBlank()) {
-            onResult(false, "Enter a temporary administrator token")
-            return
-        }
-        viewModelScope.launch {
-            val candidate = runCatching { clientManager.createAdminService(temporaryToken.trim()) }
-                .getOrElse {
-                    onResult(false, "Could not prepare administrator access")
-                    return@launch
-                }
-            runCatching {
-                val stats = candidate.getStats()
-                val users = candidate.getUsers().users
-                stats to users
-            }.onSuccess { (stats, users) ->
-                adminService = candidate
-                _adminStats.value = stats
-                _adminUsers.value = users
-                _adminSelectedSessions.value = null
-                _adminAuthorized.value = true
-                onResult(true, "Administrative access granted for this app session")
-            }.onFailure {
-                endAdminSession()
-                onResult(false, "Administrator authorization was rejected or unavailable")
-            }
-        }
-    }
-
-    fun endAdminSession() {
-        adminService = null
-        _adminAuthorized.value = false
-        _adminStats.value = null
-        _adminUsers.value = emptyList()
-        _adminSelectedSessions.value = null
-    }
-
-    fun refreshAdminData(query: String = "", onResult: (Boolean, String) -> Unit = { _, _ -> }) {
-        val api = adminService ?: return onResult(false, "Administrator access has expired")
-        viewModelScope.launch {
-            runCatching {
-                val stats = api.getStats()
-                val users = api.getUsers(query.trim().ifBlank { null }).users
-                stats to users
-            }.onSuccess { (stats, users) ->
-                _adminStats.value = stats
-                _adminUsers.value = users
-                onResult(true, "")
-            }.onFailure { handleAdminFailure(it, onResult) }
-        }
-    }
-
-    fun inspectAdminUserSessions(userId: Int, onResult: (Boolean, String) -> Unit) {
-        val api = adminService ?: return onResult(false, "Administrator access has expired")
-        viewModelScope.launch {
-            runCatching { api.getUserSessions(userId) }
-                .onSuccess {
-                    _adminSelectedSessions.value = it
-                    onResult(true, "")
-                }
-                .onFailure { handleAdminFailure(it, onResult) }
-        }
-    }
-
-    fun setAdminUserBan(userId: Int, banned: Boolean, reason: String, onResult: (Boolean, String) -> Unit) {
-        val api = adminService ?: return onResult(false, "Administrator access has expired")
-        viewModelScope.launch {
-            runCatching { api.setUserBan(userId, NetworkAdminBanRequest(banned, reason.trim())) }
-                .onSuccess {
-                    refreshAdminData(onResult = { _, _ -> })
-                    onResult(true, if (banned) "Account has been blocked" else "Account block has been removed")
-                }
-                .onFailure { handleAdminFailure(it, onResult) }
-        }
-    }
-
-    fun deleteAdminUser(userId: Int, onResult: (Boolean, String) -> Unit) {
-        val api = adminService ?: return onResult(false, "Administrator access has expired")
-        viewModelScope.launch {
-            runCatching { api.deleteUser(userId) }
-                .onSuccess {
-                    if (_adminSelectedSessions.value?.user?.id == userId) _adminSelectedSessions.value = null
-                    refreshAdminData(onResult = { _, _ -> })
-                    onResult(true, "Account and its server records have been deleted")
-                }
-                .onFailure { handleAdminFailure(it, onResult) }
-        }
-    }
-
-    private fun handleAdminFailure(error: Throwable, onResult: (Boolean, String) -> Unit) {
-        val status = (error as? retrofit2.HttpException)?.code()
-        if (status == 401 || status == 403) endAdminSession()
-        onResult(false, if (status == 401 || status == 403) "Administrator access has expired" else "Administrative request failed")
     }
 
 }
