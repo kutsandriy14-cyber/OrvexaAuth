@@ -125,11 +125,12 @@ try {
   assert(guestTicket.relayUrl?.startsWith('wss://'), 'guest received a separate public WSS relay URL through Cloudflare');
 
   hostSocket = await openSocket(created.relayUrl, 'host');
+  // The Durable Object announces pairing as soon as the guest connects. Arm the
+  // host listener first so the test cannot miss that valid, immediate message.
+  const hostReady = waitForMessage(hostSocket, 'host', value => value?.type === 'ready' && value.peer === 'guest');
   guestSocket = await openSocket(guestTicket.relayUrl, 'guest');
-  await Promise.all([
-    waitForMessage(hostSocket, 'host', value => value?.type === 'ready' && value.peer === 'guest'),
-    waitForMessage(guestSocket, 'guest', value => value?.type === 'ready' && value.peer === 'host')
-  ]);
+  const guestReady = waitForMessage(guestSocket, 'guest', value => value?.type === 'ready' && value.peer === 'host');
+  await Promise.all([hostReady, guestReady]);
   assert(true, 'Cloudflare Durable Object paired the public host and guest WebSockets');
 
   const hostPayload = new Uint8Array([0x4f, 0x52, 0x56, 0x45, 0x58, 0x41, 0x01]);
