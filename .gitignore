@@ -19,3 +19,4 @@ debug.keystore
 *.jks
 *.keystore
 signing.properties
+.orvexaauth-worker-deploy-input.json

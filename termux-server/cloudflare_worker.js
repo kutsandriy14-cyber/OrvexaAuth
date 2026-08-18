@@ -15,12 +15,14 @@
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 const LAN_SESSION_TTL_SECONDS = 4 * 60 * 60; // 4 hours
 const LAN_TICKET_TTL_SECONDS = 5 * 60; // 5 minutes
+const ADMIN_SESSION_TTL_SECONDS = 15 * 60; // 15 minutes
+const ADMIN_REQUEST_TTL_SECONDS = 3 * 60; // replay-protection window
 
 // CORS headers helper
 function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, X-Database-Name, X-App-Name, Authorization",
+    "Access-Control-Allow-Headers": "Content-Type, X-Database-Name, X-App-Name, Authorization, X-Admin-Device-Id, X-Admin-Request-Id, X-Admin-Request-Time",
     "Access-Control-Allow-Methods": "GET, PUT, POST, DELETE, OPTIONS",
     "Access-Control-Max-Age": "86400",
   };
@@ -348,19 +350,105 @@ async function closeLanRelay(env, dbName, sessionId, code = 4001, reason = "LAN 
   });
 }
 
-async function hasAdminAccess(request, env) {
-  const configuredSecret = String(env?.ADMIN_SECRET || "");
-  const header = request.headers.get("Authorization") || "";
-  const match = header.match(/^Admin\s+(.+)$/i);
-  if (!configuredSecret || !match) return false;
+function adminDeviceId(request) {
+  const value = String(request.headers.get("X-Admin-Device-Id") || "").trim();
+  return /^[A-Za-z0-9._:-]{16,160}$/.test(value) ? value : "";
+}
 
-  const suppliedSecret = match[1].trim();
-  if (suppliedSecret.length !== configuredSecret.length) return false;
-  let difference = 0;
-  for (let index = 0; index < suppliedSecret.length; index++) {
-    difference |= suppliedSecret.charCodeAt(index) ^ configuredSecret.charCodeAt(index);
+async function sha256Hex(value) {
+  const bytes = new TextEncoder().encode(String(value));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function verifyAdminBootstrapSecret(env, suppliedSecret) {
+  const expectedSecret = String(env.ADMIN_SECRET || "").trim();
+  const candidate = String(suppliedSecret || "").trim();
+  if (!expectedSecret || !candidate) return false;
+  return (await sha256Hex(expectedSecret)) === (await sha256Hex(candidate));
+}
+
+async function createAdminSession(request, kv, dbName, env = {}) {
+  const userSession = await requireAuth(request, kv, dbName);
+  if (!userSession) return { error: errorResponse("A valid OrvexaAuth session is required", 401) };
+
+  const user = await readUser(kv, dbName, userSession.userId);
+  if (!user || user.isBanned) return { error: errorResponse("Account is not permitted to administer", 403) };
+
+  const deviceId = adminDeviceId(request);
+  if (!deviceId) return { error: errorResponse("A valid administrator device identifier is required", 400) };
+
+  const body = await request.json().catch(() => ({}));
+  if (!(await verifyAdminBootstrapSecret(env, body.adminSecret))) {
+    return { error: errorResponse("A valid temporary administrator token is required", 403) };
   }
-  return difference === 0;
+
+  const token = crypto.randomUUID();
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + ADMIN_SESSION_TTL_SECONDS * 1000;
+  const session = {
+    userId: String(user.id),
+    issuedAt,
+    expiresAt,
+    deviceHash: await sha256Hex(deviceId),
+    operatorDisplayName: `${user.firstName || ""} ${user.lastName || ""}`.trim() || String(user.email || user.id)
+  };
+  await kv.put(`${dbName}:admin_session:${token}`, JSON.stringify(session), { expirationTtl: ADMIN_SESSION_TTL_SECONDS });
+  return { token, ...session };
+}
+
+async function requireAdminSession(request, kv, dbName, env = {}) {
+  const header = request.headers.get("Authorization") || "";
+  const token = header.match(/^AdminSession\s+([A-Za-z0-9-]{20,})$/i)?.[1] || "";
+  if (!token) return null;
+  const raw = await kv.get(`${dbName}:admin_session:${token}`);
+  if (!raw) return null;
+
+  try {
+    const session = JSON.parse(raw);
+      if (Number(session.expiresAt || 0) <= Date.now()) {
+      await kv.delete(`${dbName}:admin_session:${token}`);
+      return null;
+    }
+    const deviceId = adminDeviceId(request);
+    if (!deviceId || session.deviceHash !== await sha256Hex(deviceId)) return null;
+    return { token, ...session };
+  } catch (_error) {
+    await kv.delete(`${dbName}:admin_session:${token}`);
+    return null;
+  }
+}
+
+async function claimAdminRequest(request, kv, dbName, adminSession) {
+  const requestId = String(request.headers.get("X-Admin-Request-Id") || "").trim();
+  const requestTime = Number(request.headers.get("X-Admin-Request-Time") || 0);
+  if (!/^[A-Za-z0-9-]{16,120}$/.test(requestId) || !Number.isFinite(requestTime) || Math.abs(Date.now() - requestTime) > 60 * 1000) {
+    return { error: errorResponse("A fresh administrator request identifier and timestamp are required", 400) };
+  }
+  const replayKey = `${dbName}:admin_request:${adminSession.token}:${requestId}`;
+  if (await kv.get(replayKey)) return { error: errorResponse("This administrator request was already processed", 409) };
+  await kv.put(replayKey, String(requestTime), { expirationTtl: ADMIN_REQUEST_TTL_SECONDS });
+  return { requestId };
+}
+
+async function writeAdminAudit(kv, dbName, detail = {}) {
+  const key = `${dbName}:admin_audit`;
+  const raw = await kv.get(key);
+  const events = raw ? JSON.parse(raw) : [];
+  const event = {
+    eventId: crypto.randomUUID(),
+    createdAt: Date.now(),
+    action: String(detail.action || "unknown").slice(0, 100),
+    actorUserId: String(detail.actorUserId || ""),
+    adminSessionHint: String(detail.adminSessionToken || "").slice(-8),
+    target: String(detail.target || "").slice(0, 300),
+    reason: String(detail.reason || "").slice(0, 240),
+    requestId: String(detail.requestId || "").slice(0, 120),
+    outcome: String(detail.outcome || "success").slice(0, 40)
+  };
+  events.push(event);
+  await kv.put(key, JSON.stringify(events.slice(-2000)));
+  return event;
 }
 
 async function listAllKeys(kv, prefix) {
@@ -478,7 +566,87 @@ async function deleteUserRecords(kv, dbName, user, env = {}) {
   }
 }
 
-async function handleAdminRequest(request, url, kv, dbName, env = {}) {
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function exportWithIntegrity(payload) {
+  return {
+    ...payload,
+    integrity: { algorithm: "SHA-256", digest: await sha256Hex(canonicalJson(payload)) }
+  };
+}
+
+function publicAdminAccount(user) {
+  return {
+    id: String(user.id),
+    displayName: `${user.firstName || ""} ${user.lastName || ""}`.trim() || String(user.email || user.id),
+    status: user.isBanned ? "restricted" : "active",
+    createdAt: user.createdAt ? new Date(Number(user.createdAt)).toISOString() : null,
+    lastLoginAt: user.lastLoginAt ? new Date(Number(user.lastLoginAt)).toISOString() : null
+  };
+}
+
+function exportedMessage(message, fallbackSender) {
+  const common = {
+    id: String(message.id),
+    senderId: String(message.senderId || message.senderEmail || fallbackSender || ""),
+    sentAt: new Date(Number(message.timestamp || message.sentAt || Date.now())).toISOString()
+  };
+  if (message.redacted) {
+    return {
+      ...common,
+      redacted: true,
+      redactedAt: message.redactedAt ? new Date(Number(message.redactedAt)).toISOString() : null,
+      reasonCode: message.redactionReasonCode || "moderated"
+    };
+  }
+  return { ...common, text: String(message.text || "") };
+}
+
+async function redactChatMessage(kv, dbName, body, adminSession, requestId) {
+  const type = String(body?.conversation?.type || "").trim();
+  const conversationId = String(body?.conversation?.id || "").trim();
+  const messageId = String(body?.messageId || "").trim();
+  const reason = String(body?.reason || "").trim();
+  const reasonCode = String(body?.reasonCode || "policy-violation").trim().slice(0, 80);
+  if (!['direct', 'group'].includes(type) || !conversationId || !messageId || reason.length < 3 || reason.length > 240) {
+    return { error: errorResponse("Conversation, message identifier and a 3-240 character reason are required", 400) };
+  }
+
+  const chatKey = type === "group"
+    ? `${dbName}:group_chat:${conversationId}`
+    : `${dbName}:chat:${conversationId}`;
+  const raw = await kv.get(chatKey);
+  if (!raw) return { error: errorResponse("Conversation not found", 404) };
+  const messages = JSON.parse(raw);
+  const message = messages.find(item => String(item.id) === messageId);
+  if (!message) return { error: errorResponse("Message not found", 404) };
+  if (message.redacted) return { error: errorResponse("Message is already removed", 409) };
+
+  delete message.text;
+  message.redacted = true;
+  message.redactedAt = Date.now();
+  message.redactedByUserId = String(adminSession.userId);
+  message.redactedBySessionHint = String(adminSession.token).slice(-8);
+  message.redactionReasonCode = reasonCode;
+  await kv.put(chatKey, JSON.stringify(messages));
+  const audit = await writeAdminAudit(kv, dbName, {
+    action: "message.redact",
+    actorUserId: adminSession.userId,
+    adminSessionToken: adminSession.token,
+    target: `${type}:${conversationId}:${messageId}`,
+    reason,
+    requestId
+  });
+  return jsonResponse({ status: "success", redactedMessage: exportedMessage(message), auditEventId: audit.eventId });
+}
+
+async function handleAdminRequest(request, url, kv, dbName, env = {}, adminSession, requestId) {
   const path = url.pathname;
   const method = request.method;
   const userMatch = path.match(/^\/api\/admin\/users\/([^/]+)$/);
@@ -493,7 +661,7 @@ async function handleAdminRequest(request, url, kv, dbName, env = {}) {
       const raw = await kv.get(keyInfo.name);
       try { if (raw && Number(JSON.parse(raw).expiresAt || 0) > Date.now()) activeSessions++; } catch (_error) {}
     }
-    return jsonResponse({ users: userKeys.length, sessions: sessionKeys.length, activeSessions, generatedAt: Date.now() });
+    return jsonResponse({ users: userKeys.length, sessions: sessionKeys.length, activeSessions, generatedAt: Date.now(), adminSessionExpiresAt: adminSession.expiresAt });
   }
 
   if (path === "/api/admin/users" && method === "GET") {
@@ -534,6 +702,14 @@ async function handleAdminRequest(request, url, kv, dbName, env = {}) {
         try { if (raw && String(JSON.parse(raw).userId) === String(user.id)) await kv.delete(keyInfo.name); } catch (_error) {}
       }
     }
+    await writeAdminAudit(kv, dbName, {
+      action: user.isBanned ? "account.restrict" : "account.restore",
+      actorUserId: adminSession.userId,
+      adminSessionToken: adminSession.token,
+      target: `user:${user.id}`,
+      reason: user.banReason || "restriction removed",
+      requestId
+    });
     return jsonResponse({ status: "success", user: sanitizeUser(user) });
   }
 
@@ -541,7 +717,79 @@ async function handleAdminRequest(request, url, kv, dbName, env = {}) {
     const user = await readUser(kv, dbName, userMatch[1]);
     if (!user) return errorResponse("User not found", 404);
     await deleteUserRecords(kv, dbName, user, env);
+    await writeAdminAudit(kv, dbName, {
+      action: "account.delete",
+      actorUserId: adminSession.userId,
+      adminSessionToken: adminSession.token,
+      target: `user:${user.id}`,
+      reason: "Account deletion",
+      requestId
+    });
     return jsonResponse({ status: "success", deletedUserId: String(user.id) });
+  }
+
+  if (path === "/api/admin/exports/accounts" && method === "GET") {
+    const identifiers = [...url.searchParams.getAll("id"), ...String(url.searchParams.get("ids") || "").split(",")]
+      .map(value => String(value).trim())
+      .filter(Boolean)
+      .slice(0, 200);
+    if (!identifiers.length) return errorResponse("At least one account identifier is required", 400);
+    const accounts = [];
+    for (const identifier of [...new Set(identifiers)]) {
+      const userId = await resolveUserId(kv, dbName, identifier);
+      const user = userId ? await readUser(kv, dbName, userId) : null;
+      if (user) accounts.push(publicAdminAccount(user));
+    }
+    const output = await exportWithIntegrity({
+      format: "orvexa.account-export",
+      schemaVersion: 1,
+      createdAt: new Date().toISOString(),
+      scope: "selected-accounts",
+      accounts
+    });
+    await writeAdminAudit(kv, dbName, {
+      action: "account.export",
+      actorUserId: adminSession.userId,
+      adminSessionToken: adminSession.token,
+      target: `${accounts.length} account(s)`,
+      reason: "Administrative export",
+      requestId
+    });
+    return new Response(JSON.stringify(output), { headers: { "Content-Type": "application/vnd.orvexa.account+json; charset=utf-8", "Content-Disposition": "attachment; filename=orvexa-accounts.ac", ...corsHeaders() } });
+  }
+
+  if (path === "/api/admin/exports/chat" && method === "GET") {
+    const type = String(url.searchParams.get("type") || "").trim();
+    const conversationId = String(url.searchParams.get("id") || "").trim();
+    if (!['direct', 'group'].includes(type) || !conversationId) return errorResponse("A valid conversation type and identifier are required", 400);
+    const chatKey = type === "group" ? `${dbName}:group_chat:${conversationId}` : `${dbName}:chat:${conversationId}`;
+    const raw = await kv.get(chatKey);
+    if (!raw) return errorResponse("Conversation not found", 404);
+    const output = await exportWithIntegrity({
+      format: "orvexa.chat-export",
+      schemaVersion: 1,
+      createdAt: new Date().toISOString(),
+      conversation: { type, id: conversationId },
+      messages: JSON.parse(raw).map(message => exportedMessage(message))
+    });
+    await writeAdminAudit(kv, dbName, {
+      action: "chat.export",
+      actorUserId: adminSession.userId,
+      adminSessionToken: adminSession.token,
+      target: `${type}:${conversationId}`,
+      reason: "Administrative export",
+      requestId
+    });
+    return new Response(JSON.stringify(output), { headers: { "Content-Type": "application/vnd.orvexa.chat+json; charset=utf-8", "Content-Disposition": "attachment; filename=orvexa-chat.chat", ...corsHeaders() } });
+  }
+
+  if (path === "/api/admin/messages/redact" && method === "POST") {
+    return redactChatMessage(kv, dbName, await request.json().catch(() => null), adminSession, requestId);
+  }
+
+  if (path === "/api/admin/audit" && method === "GET") {
+    const events = JSON.parse((await kv.get(`${dbName}:admin_audit`)) || "[]");
+    return jsonResponse({ events: events.slice(-500).reverse() });
   }
 
   return errorResponse("Admin route not found", 404);
@@ -592,12 +840,47 @@ async function handleFetch(request, env = {}, ctx) {
       });
     }
 
-    if (path.startsWith("/api/admin/")) {
-      if (!(await hasAdminAccess(request, env))) return errorResponse("Forbidden: valid administrator credentials are required", 403);
+    if (path === "/api/admin/session" && method === "POST") {
       try {
-        return await handleAdminRequest(request, url, kv, dbName, env);
+        const created = await createAdminSession(request, kv, dbName, env);
+        if (created.error) return created.error;
+        await writeAdminAudit(kv, dbName, {
+          action: "admin.session.create",
+          actorUserId: created.userId,
+          adminSessionToken: created.token,
+          target: "administrator-session",
+          reason: "TOTP verified",
+          outcome: "success"
+        });
+        return jsonResponse({
+          accessToken: created.token,
+          expiresAt: created.expiresAt,
+          operatorDisplayName: created.operatorDisplayName
+        }, 201);
+      } catch (error) {
+        console.error("OrvexaAuth admin session error", error);
+        return errorResponse("Unable to create administrator session", 500);
+      }
+    }
+
+    if (path.startsWith("/api/admin/")) {
+      const adminSession = await requireAdminSession(request, kv, dbName, env);
+      if (!adminSession) return errorResponse("A valid, unexpired administrator session is required", 403);
+      const claimedRequest = await claimAdminRequest(request, kv, dbName, adminSession);
+      if (claimedRequest.error) return claimedRequest.error;
+      try {
+        return await handleAdminRequest(request, url, kv, dbName, env, adminSession, claimedRequest.requestId);
       } catch (error) {
         console.error("OrvexaAuth admin route error", error);
+        await writeAdminAudit(kv, dbName, {
+          action: "admin.request.error",
+          actorUserId: adminSession.userId,
+          adminSessionToken: adminSession.token,
+          target: `${method}:${path}`,
+          reason: "Server-side administrative operation failure",
+          requestId: claimedRequest.requestId,
+          outcome: "error"
+        });
         return errorResponse("Administrative request failed", 500);
       }
     }
