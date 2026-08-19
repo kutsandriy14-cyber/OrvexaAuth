@@ -4,6 +4,7 @@ package com.example.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.widget.Toast
 
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
@@ -1367,6 +1368,7 @@ fun DashboardHomeTab(
     viewModel: AccountViewModel,
     onNavigateToTab: (Int) -> Unit
 ) {
+    val context = LocalContext.current
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1414,12 +1416,35 @@ fun DashboardHomeTab(
             textAlign = TextAlign.Center
         )
 
-        Text(
-            text = user.email,
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier = Modifier.testTag("profile_email")
+        ) {
+            Text(
+                text = user.email,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            IconButton(
+                onClick = {
+                    copyToClipboard(context, user.email)
+                    Toast.makeText(context, "E-mail copied", Toast.LENGTH_SHORT).show()
+                },
+                modifier = Modifier
+                    .size(40.dp)
+                    .testTag("profile_copy_email_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.ContentCopy,
+                    contentDescription = "Copy e-mail",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+        }
 
         Spacer(modifier = Modifier.height(18.dp))
 
