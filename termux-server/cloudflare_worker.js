@@ -140,6 +140,24 @@ async function groupForMember(kv, dbName, groupId, userId) {
   return Array.isArray(group.memberIds) && group.memberIds.map(String).includes(String(userId)) ? group : null;
 }
 
+async function isUserOnline(kv, dbName, userId) {
+  const sessionList = await kv.list({ prefix: `${dbName}:session:` });
+  for (const item of sessionList.keys) {
+    const raw = await kv.get(item.name);
+    if (!raw) continue;
+    try {
+      const session = JSON.parse(raw);
+      if (String(session.userId) === String(userId) && Number(session.expiresAt) > Date.now()) return true;
+    } catch (_e) {}
+  }
+  return false;
+}
+
+function conversationKey(dbName, firstEmail, secondEmail) {
+  const participants = [String(firstEmail).trim().toLowerCase(), String(secondEmail).trim().toLowerCase()].sort();
+  return `${dbName}:conversation:${encodeURIComponent(participants[0])}_and_${encodeURIComponent(participants[1])}`;
+}
+
 function base32Encode(bytes) {
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
   let bits = 0;
@@ -433,6 +451,13 @@ async function sha256Hex(value) {
 
 async function verifyAdminBootstrapSecret(env, suppliedSecret) {
   const expectedSecret = String(env.ADMIN_SECRET || "").trim();
+  const candidate = String(suppliedSecret || "").trim();
+  if (!expectedSecret || !candidate) return false;
+  return (await sha256Hex(expectedSecret)) === (await sha256Hex(candidate));
+}
+
+async function verifyQrEnrollmentSecret(env, suppliedSecret) {
+  const expectedSecret = String(env.QR_ACCESS_BOOTSTRAP_SECRET || "").trim();
   const candidate = String(suppliedSecret || "").trim();
   if (!expectedSecret || !candidate) return false;
   return (await sha256Hex(expectedSecret)) === (await sha256Hex(candidate));
@@ -936,7 +961,7 @@ async function handleQrAccessRequest(request, url, kv, dbName, env = {}) {
 
   if (path === "/api/qr-access/issuers/enroll" && method === "POST") {
     const enrollmentSecret = String(request.headers.get("X-QR-Enrollment-Secret") || "").trim();
-    if (!(await verifyAdminBootstrapSecret(env, enrollmentSecret))) return errorResponse("A valid owner enrollment secret is required", 403);
+    if (!(await verifyQrEnrollmentSecret(env, enrollmentSecret))) return errorResponse("A valid owner enrollment secret is required", 403);
     const body = await request.json().catch(() => null);
     const publicKeyPem = String(body?.publicKeyPem || "").trim();
     const label = String(body?.label || "Personal QR Access Generator").trim().slice(0, 120);
@@ -1350,18 +1375,7 @@ async function handleFetch(request, env = {}, ctx) {
         const userId = path.split("/")[3];
         const user = await readUser(kv, dbName, userId);
         if (!user) return errorResponse("User not found", 404);
-        const sessionList = await kv.list({ prefix: `${dbName}:session:` });
-        let online = false;
-        for (const item of sessionList.keys) {
-          const raw = await kv.get(item.name);
-          if (raw) {
-            try {
-              const session = JSON.parse(raw);
-              if (String(session.userId) === String(userId) && session.expiresAt > Date.now()) { online = true; break; }
-            } catch (_e) {}
-          }
-        }
-        return jsonResponse({ ...sanitizeUser(user), online });
+        return jsonResponse({ ...sanitizeUser(user), online: await isUserOnline(kv, dbName, userId) });
       }
 
       if (/^\/api\/users\/[^/]+\/(sessions|devices)$/.test(path) && method === "GET") {
@@ -1429,7 +1443,8 @@ async function handleFetch(request, env = {}, ctx) {
             if (relation.status !== "accepted" && relation.requesterId !== String(userId) && relation.targetId !== String(userId)) continue;
             const otherId = relation.requesterId === String(userId) ? relation.targetId : relation.requesterId;
             const other = await readUser(kv, dbName, otherId);
-            friends.push({ ...relation, user: other ? sanitizeUser(other) : null, direction: relation.requesterId === String(userId) ? "outgoing" : "incoming" });
+            const user = other ? { ...sanitizeUser(other), online: await isUserOnline(kv, dbName, otherId) } : null;
+            friends.push({ ...relation, user, direction: relation.requesterId === String(userId) ? "outgoing" : "incoming" });
           } catch (_e) {}
         }
         return jsonResponse(friends);
@@ -1520,7 +1535,7 @@ async function handleFetch(request, env = {}, ctx) {
         const members = [];
         for (const memberId of group.memberIds) {
           const member = await readUser(kv, dbName, memberId);
-          if (member) members.push(sanitizeUser(member));
+          if (member) members.push({ ...sanitizeUser(member), online: await isUserOnline(kv, dbName, memberId) });
         }
         return jsonResponse({ ...group, members });
       }
@@ -1549,7 +1564,7 @@ async function handleFetch(request, env = {}, ctx) {
         const body = await request.json();
         const messageText = String(body.text || "").trim();
         if (!messageText) return errorResponse("Message text is required", 400);
-        const message = { id: messages.length + 1, senderId: String(authSession.userId), text: messageText.slice(0, 4000), timestamp: Date.now() };
+        const message = { id: Number(messages.at(-1)?.id || 0) + 1, senderId: String(authSession.userId), text: messageText.slice(0, 4000), timestamp: Date.now() };
         messages.push(message);
         await kv.put(key, JSON.stringify(messages.slice(-500)));
         return jsonResponse(message, 201);
@@ -2076,7 +2091,41 @@ async function handleFetch(request, env = {}, ctx) {
         return jsonResponse({ status: "success", message: "File deleted successfully" });
       }
 
-      // 12. GET MESSAGES
+      // 12. PERSISTENT DIRECT CONVERSATIONS AND MESSAGES
+      if (path === "/api/conversations" && method === "GET") {
+        const result = await kv.list({ prefix: `${dbName}:conversation:` });
+        const conversations = [];
+        for (const item of result.keys) {
+          const raw = await kv.get(item.name);
+          if (!raw) continue;
+          try {
+            const conversation = JSON.parse(raw);
+            if (Array.isArray(conversation.participantEmails) && conversation.participantEmails.includes(String(authSession.email).toLowerCase())) conversations.push(conversation);
+          } catch (_e) {}
+        }
+        return jsonResponse(conversations.sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0)));
+      }
+
+      if (path === "/api/conversations" && method === "POST") {
+        const body = await request.json();
+        const targetId = await resolveUserId(kv, dbName, body.partnerEmail || body.targetEmail);
+        if (!targetId) return errorResponse("Recipient account not found", 404);
+        if (String(targetId) === String(authSession.userId)) return errorResponse("Cannot create a conversation with yourself", 400);
+        if (await kv.get(`${dbName}:block:${authSession.userId}:${targetId}`) || await kv.get(`${dbName}:block:${targetId}:${authSession.userId}`)) return errorResponse("Conversation is blocked", 403);
+        const target = await readUser(kv, dbName, targetId);
+        if (!target) return errorResponse("Recipient account not found", 404);
+        const ownerEmail = String(authSession.email).trim().toLowerCase();
+        const targetEmail = String(target.email).trim().toLowerCase();
+        const key = conversationKey(dbName, ownerEmail, targetEmail);
+        const existing = await kv.get(key);
+        if (existing) return jsonResponse(JSON.parse(existing));
+        const now = Date.now();
+        const conversation = { id: key.substring(`${dbName}:conversation:`.length), participantEmails: [ownerEmail, targetEmail].sort(), createdAt: now, updatedAt: now, lastMessageAt: null };
+        await kv.put(key, JSON.stringify(conversation));
+        return jsonResponse(conversation, 201);
+      }
+
+      // 12a. GET MESSAGES
       if (path === "/api/messages" && method === "GET") {
         const user1 = (url.searchParams.get("user1") || "").trim().toLowerCase();
         const user2 = (url.searchParams.get("user2") || "").trim().toLowerCase();
@@ -2098,7 +2147,7 @@ async function handleFetch(request, env = {}, ctx) {
         return jsonResponse([]);
       }
 
-      // 12. SEND MESSAGE
+      // 12b. SEND MESSAGE
       if (path === "/api/messages" && method === "POST") {
         const body = await request.json();
         const sender = (body.senderEmail || "").trim().toLowerCase();
@@ -2109,6 +2158,9 @@ async function handleFetch(request, env = {}, ctx) {
           return errorResponse("senderEmail, receiverEmail and text are required", 400);
         }
         if (sender !== String(authSession.email).toLowerCase()) return errorResponse("Forbidden", 403);
+        const receiverId = await resolveUserId(kv, dbName, receiver);
+        if (!receiverId) return errorResponse("Recipient account not found", 404);
+        if (await kv.get(`${dbName}:block:${authSession.userId}:${receiverId}`) || await kv.get(`${dbName}:block:${receiverId}:${authSession.userId}`)) return errorResponse("Message delivery is blocked", 403);
 
         const sortedUsers = [sender, receiver].sort();
         const chatKey = `${dbName}:chat:${sortedUsers[0]}_and_${sortedUsers[1]}`;
@@ -2116,7 +2168,7 @@ async function handleFetch(request, env = {}, ctx) {
         const rawMessages = await kv.get(chatKey);
         const messages = rawMessages ? JSON.parse(rawMessages) : [];
 
-        const msgId = messages.length + 1;
+        const msgId = Number(messages.at(-1)?.id || 0) + 1;
         const newMsg = {
           id: msgId,
           senderEmail: sender,
@@ -2126,7 +2178,14 @@ async function handleFetch(request, env = {}, ctx) {
         };
         messages.push(newMsg);
 
-        await kv.put(chatKey, JSON.stringify(messages));
+        await kv.put(chatKey, JSON.stringify(messages.slice(-500)));
+        const conversationStorageKey = conversationKey(dbName, sender, receiver);
+        const conversationRaw = await kv.get(conversationStorageKey);
+        const now = Date.now();
+        const conversation = conversationRaw
+          ? { ...JSON.parse(conversationRaw), updatedAt: now, lastMessageAt: now }
+          : { id: conversationStorageKey.substring(`${dbName}:conversation:`.length), participantEmails: [sender, receiver].sort(), createdAt: now, updatedAt: now, lastMessageAt: now };
+        await kv.put(conversationStorageKey, JSON.stringify(conversation));
         return jsonResponse({ status: "success", message: "Message sent", id: msgId });
       }
 

@@ -62,6 +62,7 @@ data class NetworkUpdatePasswordRequest(
 data class NetworkUserResponse(
     val id: Int,
     val email: String,
+    val online: Boolean = false,
     @com.squareup.moshi.Json(name = "firstName") val firstNameCamel: String? = null,
     @com.squareup.moshi.Json(name = "first_name") val firstNameSnake: String? = null,
     @com.squareup.moshi.Json(name = "lastName") val lastNameCamel: String? = null,
@@ -111,7 +112,8 @@ data class NetworkUserResponse(
             macAddress = mac,
             keyProtect = kp,
             dataQuotaMb = quota,
-            createdAt = created
+            createdAt = created,
+            online = online
         )
     }
 }
@@ -165,6 +167,12 @@ interface NetAuthService {
 
     @POST("api/messages")
     suspend fun sendMessage(@Body request: SendMessageRequest): StatusResponse
+
+    @GET("api/conversations")
+    suspend fun getConversations(): List<NetworkConversation>
+
+    @POST("api/conversations")
+    suspend fun createConversation(@Body request: NetworkCreateConversationRequest): NetworkConversation
 
     @POST("api/qr/sessions")
     suspend fun createQrSession(@Body request: NetworkQrCreateRequest): NetworkQrSessionResponse
@@ -254,6 +262,16 @@ data class SendMessageRequest(
     val receiverEmail: String,
     val text: String
 )
+
+data class NetworkConversation(
+    val id: String,
+    val participantEmails: List<String> = emptyList(),
+    val createdAt: Long,
+    val updatedAt: Long,
+    val lastMessageAt: Long? = null
+)
+
+data class NetworkCreateConversationRequest(val partnerEmail: String)
 
 /** The API receives a SHA-256 value, never the raw current password. */
 data class NetworkDeleteAccountRequest(val passwordHash: String)

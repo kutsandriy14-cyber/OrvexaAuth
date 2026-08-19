@@ -23,8 +23,8 @@ android {
     applicationId = "com.orvexa.auth"
     minSdk = 24
     targetSdk = 36
-    versionCode = 7
-    versionName = "0.1.5"
+    versionCode = 8
+    versionName = "0.1.6"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

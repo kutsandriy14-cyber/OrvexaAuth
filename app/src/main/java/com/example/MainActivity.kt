@@ -12,11 +12,13 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.example.data.UpdateManager
 import com.example.ui.*
 import com.example.ui.theme.MyApplicationTheme
 
@@ -33,6 +35,13 @@ class MainActivity : ComponentActivity() {
                 val accountViewModel: AccountViewModel = viewModel()
                 val isAppLocked by accountViewModel.isAppLocked.collectAsState()
                 val requestId = qrApprovalRequest.value
+                val availableUpdate = remember { mutableStateOf<UpdateManager.ReleaseUpdate?>(null) }
+                val updateDialogVisible = remember { mutableStateOf(false) }
+
+                LaunchedEffect(Unit) {
+                    availableUpdate.value = UpdateManager.check()
+                    updateDialogVisible.value = availableUpdate.value != null
+                }
 
                 LaunchedEffect(requestId) {
                     if (!requestId.isNullOrBlank() && accountViewModel.loggedInUser.value != null) {
@@ -106,6 +115,8 @@ class MainActivity : ComponentActivity() {
                             composable(Screen.Dashboard.route) {
                                 DashboardScreen(
                                     viewModel = accountViewModel,
+                                    availableUpdate = availableUpdate.value,
+                                    onShowUpdate = { updateDialogVisible.value = true },
                                     onSignOut = {
                                         navController.navigate(Screen.AccountChooser.route) {
                                             popUpTo(0) { inclusive = true }
@@ -119,6 +130,14 @@ class MainActivity : ComponentActivity() {
                         PasscodeLockScreen(
                             viewModel = accountViewModel,
                             onUnlock = { accountViewModel.unlockApp() }
+                        )
+                    }
+                    val update = availableUpdate.value
+                    if (update != null && updateDialogVisible.value) {
+                        UpdateAvailableDialog(
+                            viewModel = accountViewModel,
+                            update = update,
+                            onDismiss = { updateDialogVisible.value = false }
                         )
                     }
                 }

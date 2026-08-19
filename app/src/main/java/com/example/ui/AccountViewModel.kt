@@ -9,8 +9,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import java.util.Calendar
@@ -73,6 +75,11 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
     val serverBlocks: StateFlow<List<NetworkBlockRelation>> = _serverBlocks.asStateFlow()
     private val _groups = MutableStateFlow<List<NetworkGroup>>(emptyList())
     val groups: StateFlow<List<NetworkGroup>> = _groups.asStateFlow()
+    private val _openedGroupId = MutableStateFlow<String?>(null)
+    private val _openedGroupMessages = MutableStateFlow<List<NetworkGroupMessage>>(emptyList())
+    val openedGroupMessages: StateFlow<List<NetworkGroupMessage>> = _openedGroupMessages.asStateFlow()
+    private val _conversations = MutableStateFlow<List<NetworkConversation>>(emptyList())
+    val conversations: StateFlow<List<NetworkConversation>> = _conversations.asStateFlow()
 
     // Current logged-in user state
     private val _loggedInUser = MutableStateFlow<User?>(null)
@@ -176,31 +183,55 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
     // Messaging operations (Server-side dynamic communication)
     fun getChatPartnersFlow(): kotlinx.coroutines.flow.Flow<List<String>> {
         val user = _loggedInUser.value ?: return kotlinx.coroutines.flow.flowOf(emptyList())
-        return kotlinx.coroutines.flow.flow {
-            messageDao.getChatPartners(user.email).collect { list ->
-                val filtered = list.filter { it.isNotEmpty() && !isUserBlocked(it) }
-                emit(filtered)
-            }
+        val ownerEmail = user.email.trim().lowercase()
+        return conversations.map { items ->
+            items.mapNotNull { conversation ->
+                conversation.participantEmails.firstOrNull { it.trim().lowercase() != ownerEmail }
+            }.filter { it.isNotEmpty() && !isUserBlocked(it) }.distinct()
         }
     }
 
     fun getMessagesForPartner(partnerEmail: String): kotlinx.coroutines.flow.Flow<List<Message>> {
         val user = _loggedInUser.value ?: return kotlinx.coroutines.flow.flowOf(emptyList())
         return kotlinx.coroutines.flow.flow {
-            try {
-                val remote = clientManager.getService().getMessages(user.email, partnerEmail)
-                emit(remote.map {
-                    Message(
-                        id = it.id,
-                        senderEmail = it.senderEmail,
-                        receiverEmail = it.receiverEmail,
-                        text = it.text,
-                        timestamp = it.timestamp
-                    )
-                })
-            } catch (_: Exception) {
-                emit(emptyList())
+            while (true) {
+                try {
+                    val remote = clientManager.getService().getMessages(user.email, partnerEmail)
+                    emit(remote.map {
+                        Message(
+                            id = it.id,
+                            senderEmail = it.senderEmail,
+                            receiverEmail = it.receiverEmail,
+                            text = it.text,
+                            timestamp = it.timestamp
+                        )
+                    })
+                } catch (_: Exception) {
+                    emit(emptyList())
+                }
+                delay(3_000)
             }
+        }
+    }
+
+    fun createConversation(recipientEmail: String, onResult: (Boolean, String) -> Unit) {
+        if (_loggedInUser.value == null) return onResult(false, "Not logged in")
+        val recipient = recipientEmail.trim().lowercase()
+        if (recipient.isEmpty()) return onResult(false, "Enter an account address")
+        viewModelScope.launch {
+            runCatching { clientManager.getService().createConversation(NetworkCreateConversationRequest(recipient)) }
+                .onSuccess {
+                    refreshConversations()
+                    onResult(true, "")
+                }
+                .onFailure { onResult(false, it.localizedMessage ?: "Could not create conversation") }
+        }
+    }
+
+    private fun refreshConversations() {
+        viewModelScope.launch {
+            runCatching { clientManager.getService().getConversations() }
+                .onSuccess { _conversations.value = it }
         }
     }
 
@@ -215,6 +246,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 clientManager.getService().sendMessage(
                     SendMessageRequest(sender.email, recipientEmail.trim().lowercase(), text.trim())
                 )
+                refreshConversations()
                 onResult(true, "")
             } catch (e: Exception) {
                 onResult(false, e.localizedMessage ?: "Remote messaging is unavailable")
@@ -1165,6 +1197,7 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 _blockedUsers.value = emails
             }
             runCatching { api.getGroups() }.onSuccess { _groups.value = it }
+            runCatching { api.getConversations() }.onSuccess { _conversations.value = it }
         }
     }
 
@@ -1264,6 +1297,38 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
             runCatching { clientManager.getService().createGroup(NetworkCreateGroupRequest(name.trim(), description.trim())) }
                 .onSuccess { refreshConnectedAccountData(); onResult(true, "Group created") }
                 .onFailure { onResult(false, it.localizedMessage ?: "Could not create group") }
+        }
+    }
+
+    fun loadServerGroupMessages(groupId: String, onResult: (Boolean, String) -> Unit = { _, _ -> }) {
+        _openedGroupId.value = groupId
+        _openedGroupMessages.value = emptyList()
+        viewModelScope.launch {
+            runCatching { clientManager.getService().getGroupMessages(groupId) }
+                .onSuccess { messages ->
+                    if (_openedGroupId.value == groupId) {
+                        _openedGroupMessages.value = messages.sortedBy { it.timestamp }
+                    }
+                    onResult(true, "")
+                }
+                .onFailure { onResult(false, it.localizedMessage ?: "Could not load group messages") }
+        }
+    }
+
+    fun sendServerGroupMessage(groupId: String, text: String, onResult: (Boolean, String) -> Unit) {
+        val cleanText = text.trim()
+        if (cleanText.isBlank()) return onResult(false, "Message cannot be empty")
+        viewModelScope.launch {
+            runCatching { clientManager.getService().sendGroupMessage(groupId, NetworkGroupMessageRequest(cleanText)) }
+                .onSuccess { message ->
+                    if (_openedGroupId.value == groupId) {
+                        _openedGroupMessages.value = (_openedGroupMessages.value + message)
+                            .distinctBy { it.id }
+                            .sortedBy { it.timestamp }
+                    }
+                    onResult(true, "Message sent")
+                }
+                .onFailure { onResult(false, it.localizedMessage ?: "Could not send group message") }
         }
     }
 

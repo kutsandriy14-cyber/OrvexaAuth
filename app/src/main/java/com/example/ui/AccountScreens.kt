@@ -168,9 +168,98 @@ fun copyToClipboard(context: Context, value: String) {
     clipboard?.setPrimaryClip(ClipData.newPlainText("OrvexaAuth", value))
 }
 
+/**
+ * Older beta accounts were stored as a local part only (for example, `p1`).
+ * Keep that record untouched while showing the actual public Orvexa address.
+ */
+private fun displayOrvexaEmail(value: String): String {
+    val normalized = value.trim()
+    return if (normalized.contains("@")) normalized else "$normalized@orvexa.auth"
+}
+
 private fun formatMegabytes(bytes: Long): String {
     if (bytes < 0L) return "—"
     return String.format(java.util.Locale.getDefault(), "%.1f MB", bytes / (1024.0 * 1024.0))
+}
+
+@Composable
+fun UpdateAvailableDialog(
+    viewModel: AccountViewModel,
+    update: UpdateManager.ReleaseUpdate,
+    onDismiss: () -> Unit
+) {
+    val currentContext = LocalContext.current
+    val progress by UpdateManager.downloadProgress.collectAsStateWithLifecycle()
+    val currentProgress = progress
+    val isDownloading = currentProgress != null && currentProgress.percent != 100
+    val progressLabel = when {
+        currentProgress == null -> ""
+        currentProgress.totalBytes > 0L && currentProgress.percent >= 0 -> {
+            viewModel.t("update_progress")
+                .replace("{downloaded}", formatMegabytes(currentProgress.downloadedBytes))
+                .replace("{total}", formatMegabytes(currentProgress.totalBytes))
+                .replace("{percent}", currentProgress.percent.toString())
+        }
+        currentProgress.downloadedBytes > 0L -> formatMegabytes(currentProgress.downloadedBytes)
+        else -> viewModel.t("downloading")
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!isDownloading) onDismiss() },
+        icon = {
+            Icon(
+                imageVector = Icons.Rounded.SystemUpdate,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+        },
+        title = { Text(viewModel.t("update_available")) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    viewModel.t("update_available_desc")
+                        .replace("{version}", update.tag.removePrefix("v"))
+                )
+                if (currentProgress != null) {
+                    Text(
+                        if (currentProgress.percent == 100) {
+                            viewModel.t("update_preparing")
+                        } else {
+                            viewModel.t("downloading")
+                        },
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    if (currentProgress.totalBytes > 0L && currentProgress.percent >= 0) {
+                        LinearProgressIndicator(
+                            progress = { currentProgress.percent.coerceIn(0, 100) / 100f },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                    Text(
+                        progressLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isDownloading) {
+                Text(viewModel.t("update_later"))
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { UpdateManager.downloadAndOpenInstaller(currentContext, update) },
+                enabled = !isDownloading && currentProgress?.percent != 100
+            ) {
+                Text(viewModel.t("update_now"))
+            }
+        }
+    )
 }
 
 // 1. Account Chooser Screen (Clean, Client-Only Login Selection)
@@ -1135,18 +1224,13 @@ fun RegisterTermsScreen(
 @Composable
 fun DashboardScreen(
     viewModel: AccountViewModel,
-    onSignOut: () -> Unit
+    onSignOut: () -> Unit,
+    availableUpdate: UpdateManager.ReleaseUpdate?,
+    onShowUpdate: () -> Unit
 ) {
     val user by viewModel.loggedInUser.collectAsStateWithLifecycle()
     val lang by viewModel.language.collectAsStateWithLifecycle()
     var activeTab by remember { mutableIntStateOf(0) }
-    var availableUpdate by remember { mutableStateOf<UpdateManager.ReleaseUpdate?>(null) }
-    var updateDialogVisible by remember { mutableStateOf(true) }
-    val downloadProgress by UpdateManager.downloadProgress.collectAsStateWithLifecycle()
-
-    LaunchedEffect(Unit) {
-        availableUpdate = UpdateManager.check()
-    }
 
     LaunchedEffect(user) {
         if (user == null) {
@@ -1204,7 +1288,7 @@ fun DashboardScreen(
                 actions = {
                     availableUpdate?.let { update ->
                         IconButton(
-                            onClick = { updateDialogVisible = true },
+                            onClick = onShowUpdate,
                             modifier = Modifier.testTag("dashboard_update_button")
                         ) {
                             Icon(Icons.Rounded.SystemUpdate, contentDescription = "Update OrvexaAuth")
@@ -1282,84 +1366,6 @@ fun DashboardScreen(
         }
     }
 
-    val update = availableUpdate
-    if (update != null && updateDialogVisible) {
-        val progress = downloadProgress
-        val isDownloading = progress != null && progress.percent != 100
-        val progressLabel = when {
-            progress == null -> ""
-            progress.totalBytes > 0L && progress.percent >= 0 -> {
-                viewModel.t("update_progress")
-                    .replace("{downloaded}", formatMegabytes(progress.downloadedBytes))
-                    .replace("{total}", formatMegabytes(progress.totalBytes))
-                    .replace("{percent}", progress.percent.toString())
-            }
-            progress.downloadedBytes > 0L -> formatMegabytes(progress.downloadedBytes)
-            else -> viewModel.t("downloading")
-        }
-
-        AlertDialog(
-            onDismissRequest = {
-                if (!isDownloading) updateDialogVisible = false
-            },
-            icon = {
-                Icon(
-                    imageVector = Icons.Rounded.SystemUpdate,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-            },
-            title = { Text(viewModel.t("update_available")) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(
-                        viewModel.t("update_available_desc")
-                            .replace("{version}", update.tag.removePrefix("v"))
-                    )
-                    if (progress != null) {
-                        Text(
-                            if (progress.percent == 100) {
-                                viewModel.t("update_preparing")
-                            } else {
-                                viewModel.t("downloading")
-                            },
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        if (progress.totalBytes > 0L && progress.percent >= 0) {
-                            LinearProgressIndicator(
-                                progress = { progress.percent.coerceIn(0, 100) / 100f },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        } else {
-                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        }
-                        Text(
-                            progressLabel,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = { updateDialogVisible = false },
-                    enabled = !isDownloading
-                ) {
-                    Text(viewModel.t("update_later"))
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = { UpdateManager.downloadAndOpenInstaller(currentContext, update) },
-                    enabled = !isDownloading && progress?.percent != 100
-                ) {
-                    Text(viewModel.t("update_now"))
-                }
-            }
-        )
-    }
 }
 
 @Composable
@@ -1369,6 +1375,7 @@ fun DashboardHomeTab(
     onNavigateToTab: (Int) -> Unit
 ) {
     val context = LocalContext.current
+    val accountEmail = displayOrvexaEmail(user.email)
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1422,7 +1429,7 @@ fun DashboardHomeTab(
             modifier = Modifier.testTag("profile_email")
         ) {
             Text(
-                text = user.email,
+                text = accountEmail,
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
@@ -1430,7 +1437,7 @@ fun DashboardHomeTab(
             Spacer(modifier = Modifier.width(4.dp))
             IconButton(
                 onClick = {
-                    copyToClipboard(context, user.email)
+                    copyToClipboard(context, accountEmail)
                     Toast.makeText(context, "E-mail copied", Toast.LENGTH_SHORT).show()
                 },
                 modifier = Modifier
@@ -2168,6 +2175,10 @@ fun DashboardMessagesTab(
     if (user == null) return
 
     val chatPartners by viewModel.getChatPartnersFlow().collectAsStateWithLifecycle(initialValue = emptyList())
+    val allUsers by viewModel.allUsers.collectAsStateWithLifecycle()
+    val onlineByEmail = remember(allUsers) {
+        allUsers.associate { it.email.trim().lowercase() to it.online }
+    }
     var selectedPartner by remember { mutableStateOf<String?>(null) }
     var showNewChatDialog by remember { mutableStateOf(false) }
     var newChatEmail by remember { mutableStateOf("") }
@@ -2225,6 +2236,7 @@ fun DashboardMessagesTab(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(chatPartners) { partner ->
+                            val isOnline = onlineByEmail[partner.trim().lowercase()] == true
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -2261,9 +2273,9 @@ fun DashboardMessagesTab(
                                                 fontWeight = FontWeight.SemiBold
                                             )
                                             Text(
-                                                text = "Tap to chat",
+                                                text = if (isOnline) "В сети" else "Не в сети",
                                                 style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                color = if (isOnline) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
                                     }
@@ -2305,6 +2317,7 @@ fun DashboardMessagesTab(
     } else {
         // Chat Thread View
         val messages by viewModel.getMessagesForPartner(selectedPartner!!).collectAsStateWithLifecycle(initialValue = emptyList())
+        val partnerOnline = onlineByEmail[selectedPartner!!.trim().lowercase()] == true
         var textToSend by remember { mutableStateOf("") }
         val listState = rememberLazyListState()
 
@@ -2350,9 +2363,9 @@ fun DashboardMessagesTab(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Active Conversation",
+                        text = if (partnerOnline) "В сети" else "Не в сети",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = if (partnerOnline) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
 
@@ -2542,9 +2555,8 @@ fun DashboardMessagesTab(
                         } else if (newChatEmail.trim().lowercase() == user!!.email.lowercase()) {
                             newChatError = "You cannot send messages to yourself"
                         } else {
-                            viewModel.sendMessage(
+                            viewModel.createConversation(
                                 recipientEmail = newChatEmail.trim(),
-                                text = "Hello! Let's chat.",
                                 onResult = { success, error ->
                                     if (!success) {
                                         newChatError = error

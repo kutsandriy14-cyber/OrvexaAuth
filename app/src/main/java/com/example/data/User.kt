@@ -13,7 +13,8 @@ data class User(
     val macAddress: String = "",
     val keyProtect: String = "",
     val dataQuotaMb: Int = 200,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val online: Boolean = false
 )
 
 data class BannedHardware(
@@ -21,4 +22,3 @@ data class BannedHardware(
     val banType: String = "IP", // "IP" or "MAC"
     val bannedAt: Long = System.currentTimeMillis()
 )
-

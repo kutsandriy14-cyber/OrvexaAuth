@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.NetworkGroup
 
 /** Orvexa Orbit social panel: friends, blocks and groups. Minecraft access belongs to Launcher. */
 @Composable
@@ -22,9 +23,13 @@ fun DashboardSocialTab(viewModel: AccountViewModel) {
     val friends by viewModel.friends.collectAsStateWithLifecycle()
     val blocks by viewModel.serverBlocks.collectAsStateWithLifecycle()
     val groups by viewModel.groups.collectAsStateWithLifecycle()
+    val openedGroupMessages by viewModel.openedGroupMessages.collectAsStateWithLifecycle()
+    val currentUser by viewModel.loggedInUser.collectAsStateWithLifecycle()
     var friendEmail by remember { mutableStateOf("") }
     var blockEmail by remember { mutableStateOf("") }
     var groupName by remember { mutableStateOf("") }
+    var selectedGroup by remember { mutableStateOf<NetworkGroup?>(null) }
+    var groupMessageText by remember { mutableStateOf("") }
     var status by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) { viewModel.refreshConnectedAccountData() }
@@ -55,8 +60,62 @@ fun DashboardSocialTab(viewModel: AccountViewModel) {
         SocialCard(Icons.Rounded.Group, "Groups") {
             OutlinedTextField(groupName, { groupName = it }, label = { Text("New group name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Button(onClick = { viewModel.createServerGroup(groupName, "") { _, message -> status = message; groupName = "" } }, enabled = groupName.isNotBlank(), modifier = Modifier.padding(top = 8.dp)) { Text("Create group") }
-            groups.forEach { group -> Text("${group.name} · ${group.memberIds.size} members", modifier = Modifier.padding(top = 8.dp)) }
+            groups.forEach { group ->
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("${group.name} · ${group.memberIds.size} members", modifier = Modifier.weight(1f))
+                    TextButton(onClick = { selectedGroup = group }) { Text("Open chat") }
+                }
+            }
         }
+    }
+
+    selectedGroup?.let { group ->
+        LaunchedEffect(group.id) {
+            groupMessageText = ""
+            viewModel.loadServerGroupMessages(group.id) { ok, message -> if (!ok) status = message }
+        }
+        AlertDialog(
+            onDismissRequest = { selectedGroup = null },
+            title = { Text(group.name) },
+            text = {
+                Column(Modifier.fillMaxWidth()) {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 80.dp, max = 260.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        if (openedGroupMessages.isEmpty()) {
+                            Text("No messages yet.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            openedGroupMessages.forEach { message ->
+                                val author = if (message.senderId == currentUser?.id?.toString()) "You" else message.senderId
+                                Text("$author: ${message.text}", modifier = Modifier.padding(vertical = 4.dp))
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = groupMessageText,
+                        onValueChange = { groupMessageText = it },
+                        label = { Text("Message") },
+                        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                        minLines = 1,
+                        maxLines = 4
+                    )
+                    Button(
+                        onClick = {
+                            viewModel.sendServerGroupMessage(group.id, groupMessageText) { ok, message ->
+                                status = message
+                                if (ok) groupMessageText = ""
+                            }
+                        },
+                        enabled = groupMessageText.isNotBlank(),
+                        modifier = Modifier.padding(top = 8.dp)
+                    ) { Text("Send") }
+                }
+            },
+            confirmButton = { TextButton(onClick = { selectedGroup = null }) { Text("Close") } }
+        )
     }
 }
 

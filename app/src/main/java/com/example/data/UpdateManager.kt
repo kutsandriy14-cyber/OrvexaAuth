@@ -82,6 +82,7 @@ object UpdateManager {
                 .url(RELEASES_URL)
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
+                .header("User-Agent", "OrvexaAuth/${BuildConfig.VERSION_NAME}")
                 .build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext null
@@ -192,6 +193,7 @@ object UpdateManager {
                 }
             } catch (_: Exception) {
                 withContext(Dispatchers.Main) {
+                    _downloadProgress.value = null
                     Toast.makeText(
                         appContext,
                         "Не удалось проверить или установить обновление",
